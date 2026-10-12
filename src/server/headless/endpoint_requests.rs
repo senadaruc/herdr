@@ -119,6 +119,15 @@ impl HeadlessServer {
                 deferred_worktree.then(|| api_request_id.clone());
             client.shell_deferred_navigation_response = deferred_navigation.then(Vec::new);
         }
+        if matches!(
+            &request.method,
+            api::schema::Method::AgentConversationRead(_)
+                | api::schema::Method::AgentConversationBlockRead(_)
+        ) {
+            self.app
+                .handle_deferred_history_request(*request, respond_to);
+            return false;
+        }
         let foreground_changed = self.promote_client_to_foreground(client_id);
         foreground_changed
             | self.handle_client_shell_api_request(

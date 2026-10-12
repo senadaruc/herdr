@@ -81,6 +81,8 @@ operations::define_operations! {
     AgentList(EmptyParams) => "agent.list", false, false;
     AgentGet(AgentTarget) => "agent.get", false, false;
     AgentRead(AgentReadParams) => "agent.read", false, false;
+    AgentConversationRead(AgentConversationReadParams) => "agent.conversation.read", false, true;
+    AgentConversationBlockRead(AgentConversationBlockReadParams) => "agent.conversation.block.read", false, true;
     AgentExplain(AgentTarget) => "agent.explain", false, false;
     AgentSendKeys(AgentSendKeysParams) => "agent.send_keys", true, false;
     AgentRename(AgentRenameParams) => "agent.rename", true, false;

@@ -76,6 +76,13 @@ pub(crate) struct WorktreeReadData {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    AgentHistoryReadFinished {
+        terminal_id: String,
+        binding: crate::agent_history::binding::HistoryBinding,
+        request_id: String,
+        response: String,
+        respond_to: std::sync::mpsc::Sender<String>,
+    },
     /// A pane's child process exited.
     PaneDied {
         pane_id: PaneId,
@@ -119,6 +126,7 @@ pub enum AppEvent {
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         session_start_source: Option<String>,
+        history_binding: Option<crate::agent_history::binding::HistoryBinding>,
     },
     /// A reporter supplied the command that resumes its own session.
     AgentResumeReported {

@@ -2655,3 +2655,113 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
 
     cleanup_spawned_herdr(child, base);
 }
+
+#[test]
+fn claude_conversation_history_is_read_only_over_real_unix_api_socket() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin = base.join("bin");
+    let claude_root = base.join("custom-synthetic-claude-config");
+    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&claude_root).unwrap();
+    register_runtime_dir(&runtime_dir);
+    fs::write(
+        config_home.join("herdr/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+    let fake = bin.join("claude");
+    fs::write(&fake, "#!/bin/sh\nHERDR_AGENT=claude exec /bin/sleep 20\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("server");
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("HERDR_SOCKET_PATH", &socket_path);
+    cmd.env("CLAUDE_CONFIG_DIR", &claude_root);
+    cmd.env("PATH", &bin);
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env_remove("HERDR_ENV");
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
+    let child = SpawnedHerdr {
+        _master: pair.master,
+        child,
+    };
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let ping = send_request(
+        &socket_path,
+        "{\"id\":\"history-ping\",\"method\":\"ping\",\"params\":{}}",
+    );
+    assert_eq!(
+        ping["result"]["capabilities"]["agent_conversation_read"],
+        true
+    );
+    assert_eq!(
+        ping["result"]["capabilities"]["agent_conversation_block_read"],
+        true
+    );
+    let workspace=send_request(&socket_path,&serde_json::json!({"id":"history-workspace","method":"workspace.create","params":{"cwd":base,"focus":false}}).to_string());
+    let pane = workspace["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let terminal = workspace["result"]["root_pane"]["terminal_id"].clone();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let start = loop {
+        let start=send_request(&socket_path,&serde_json::json!({"id":"history-fake-agent","method":"agent.start","params":{"name":"synthetic-claude","kind":"claude","pane_id":pane,"timeout_ms":8000}}).to_string());
+        if start["error"]["code"] != "agent_pane_busy" {
+            break start;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "synthetic shell never became available: {start}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(start["result"]["type"], "agent_started", "{start}");
+    let transcript = claude_root.join("synthetic-session.jsonl");
+    fs::write(
+        &transcript,
+        include_str!("fixtures/claude-history/visible.jsonl"),
+    )
+    .unwrap();
+    let report=send_request(&socket_path,&serde_json::json!({"id":"history-binding","method":"pane.report_agent_session","params":{"pane_id":pane,"source":"herdr:claude","agent":"claude","agent_session_id":"synthetic-session","agent_session_path":transcript,"session_start_source":"startup","seq":1}}).to_string());
+    assert_eq!(report["result"]["type"], "ok");
+    let read=send_request(&socket_path,&serde_json::json!({"id":"history-read","method":"agent.conversation.read","params":{"target":pane,"expected_session_id":"synthetic-session","window":{"kind":"latest"}}}).to_string());
+    assert_eq!(read["result"]["availability"], "ready", "{read}");
+    assert_eq!(read["result"]["messages"][0]["id"], "human-1");
+    assert_eq!(read["result"]["turns"].as_array().unwrap().len(), 1);
+    let search=send_request(&socket_path,&serde_json::json!({"id":"history-search","method":"agent.conversation.read","params":{"target":pane,"expected_session_id":"synthetic-session","window":{"kind":"search","query":"reply"}}}).to_string());
+    assert_eq!(
+        search["result"]["match_message_ids"],
+        serde_json::json!(["assistant-1"])
+    );
+    let mismatch=send_request(&socket_path,&serde_json::json!({"id":"history-mismatch","method":"agent.conversation.read","params":{"target":pane,"expected_session_id":"wrong-session","window":{"kind":"latest"}}}).to_string());
+    assert_eq!(mismatch["error"]["code"], "session_changed");
+    let after=send_request(&socket_path,&serde_json::json!({"id":"history-pane-after","method":"pane.get","params":{"pane_id":pane}}).to_string());
+    assert_eq!(after["result"]["pane"]["terminal_id"], terminal);
+    assert_eq!(
+        after["result"]["pane"]["agent_session"]["value"],
+        "synthetic-session"
+    );
+    fs::remove_file(transcript).unwrap();
+    let missing=send_request(&socket_path,&serde_json::json!({"id":"history-missing","method":"agent.conversation.read","params":{"target":pane,"expected_session_id":"synthetic-session","window":{"kind":"latest"}}}).to_string());
+    assert_eq!(missing["result"]["availability"], "source_missing");
+    cleanup_spawned_herdr(child, base);
+}

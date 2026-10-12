@@ -139,6 +139,7 @@ pub struct TerminalState {
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
     reported_resume_revision: u64,
+    pub history_binding: Option<crate::agent_history::binding::HistoryBinding>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
@@ -179,6 +180,7 @@ impl TerminalState {
             persisted_agent_session: None,
             reported_resume: None,
             reported_resume_revision: 0,
+            history_binding: None,
             terminal_title: None,
             manual_label: None,
             agent_name: None,
@@ -1440,6 +1442,36 @@ impl TerminalState {
     ) -> bool {
         (source, agent_label, session_start_source, seq)
             == ("herdr:opencode", "opencode", Some("select"), None)
+    }
+
+    pub fn active_history_binding(&self) -> Option<&crate::agent_history::binding::HistoryBinding> {
+        let binding = self.history_binding.as_ref()?;
+        let session = self.persisted_agent_session.as_ref()?;
+        (session.source == "herdr:claude"
+            && session.agent == "claude"
+            && session.session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+            && session.session_ref.value == binding.session_id)
+            .then_some(binding)
+    }
+
+    pub fn set_history_binding(&mut self, binding: crate::agent_history::binding::HistoryBinding) {
+        if !self
+            .persisted_agent_session
+            .as_ref()
+            .is_some_and(|session| {
+                session.source == "herdr:claude"
+                    && session.agent == "claude"
+                    && session.session_ref.value == binding.session_id
+            })
+        {
+            return;
+        }
+        if self.history_binding.as_ref().is_some_and(|old| {
+            old.session_id == binding.session_id && old.transcript_path == binding.transcript_path
+        }) {
+            return;
+        }
+        self.history_binding = Some(binding);
     }
 
     pub fn set_persisted_agent_session(

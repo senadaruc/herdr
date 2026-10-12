@@ -598,6 +598,18 @@ fn restore_tab(
             }
             if let Some(session) = restored_agent_session {
                 terminal.set_persisted_agent_session(session);
+                if let Some(saved) = saved_pane.and_then(|pane| pane.history_binding.as_ref()) {
+                    if let Some(binding) =
+                        crate::agent_history::binding::HistoryBinding::from_report(
+                            "herdr:claude",
+                            "claude",
+                            Some(&saved.session_id),
+                            saved.transcript_path.to_str(),
+                        )
+                    {
+                        terminal.set_history_binding(binding);
+                    }
+                }
             }
             if let Some(resume) = restored_agent_resume {
                 terminal.restore_reported_resume(resume);
@@ -698,6 +710,18 @@ fn restore_tab(
                 }
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
+                    if let Some(saved) = saved_pane.and_then(|pane| pane.history_binding.as_ref()) {
+                        if let Some(binding) =
+                            crate::agent_history::binding::HistoryBinding::from_report(
+                                "herdr:claude",
+                                "claude",
+                                Some(&saved.session_id),
+                                saved.transcript_path.to_str(),
+                            )
+                        {
+                            terminal.set_history_binding(binding);
+                        }
+                    }
                 }
                 if let Some(resume) = restored_agent_resume {
                     terminal.restore_reported_resume(resume);
@@ -1553,6 +1577,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             agent_resume: None,
+                            history_binding: None,
                             launch_argv: None,
                         },
                     )]),
@@ -1635,6 +1660,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
+                                history_binding: None,
                                 launch_argv: None,
                             },
                         ),
@@ -1647,6 +1673,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
+                                history_binding: None,
                                 launch_argv: None,
                             },
                         ),
@@ -1701,6 +1728,7 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     agent_resume: None,
+                    history_binding: None,
                     launch_argv: None,
                 },
             )
@@ -1717,6 +1745,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             agent_resume: None,
+            history_binding: None,
             launch_argv: None,
         };
         let snapshot = SessionSnapshot {
@@ -1869,6 +1898,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             agent_resume: None,
+                            history_binding: None,
                             launch_argv: None,
                         },
                     )]),
@@ -2175,6 +2205,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                history_binding: None,
                 launch_argv: None,
             },
         );

@@ -3329,6 +3329,36 @@ impl Drop for InputSourceRestore {
     }
 }
 
+pub(crate) fn open_regular_file_readonly(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source is not a regular file",
+        ));
+    }
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+pub(crate) fn regular_file_identity(file: &std::fs::File) -> std::io::Result<String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(format!(
+        "{}:{}:{}",
+        info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

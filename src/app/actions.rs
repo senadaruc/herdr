@@ -1540,6 +1540,7 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::AgentHistoryReadFinished { .. } => Vec::new(),
             AppEvent::AgentSessionReported {
                 pane_id,
                 source,
@@ -1547,15 +1548,22 @@ impl AppState {
                 seq,
                 session_ref,
                 session_start_source,
+                history_binding,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref_for_session_start(
+                    let mutation = terminal.set_agent_session_ref_for_session_start(
                         source,
                         agent_label,
                         session_ref,
                         seq,
                         session_start_source,
-                    )
+                    );
+                    if mutation.is_some() {
+                        if let Some(binding) = history_binding {
+                            terminal.set_history_binding(binding);
+                        }
+                    }
+                    mutation
                 })
                 .into_iter()
                 .collect(),

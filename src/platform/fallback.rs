@@ -277,3 +277,19 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
 pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
     Ok(false)
 }
+
+#[cfg(not(unix))]
+pub(crate) fn open_regular_file_readonly(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+#[cfg(not(unix))]
+pub(crate) fn regular_file_identity(file: &std::fs::File) -> std::io::Result<String> {
+    Ok(format!("{:?}", file.metadata()?.created()?))
+}

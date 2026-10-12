@@ -256,6 +256,14 @@ mod tests {
         );
 
         assert_eq!(
+            actual.remove("agent.conversation.read").as_deref(),
+            Some("ba370b515123b76cd155658e6b9c9ed3132c6e02fef27217f0083394af3918f3")
+        );
+        assert_eq!(
+            actual.remove("agent.conversation.block.read").as_deref(),
+            Some("a542322d4a1db2763d5d06fd60d63678eb0fb9b6c36a5d730de91012b1e6647c")
+        );
+        assert_eq!(
             actual, expected,
             "an existing endpoint method changed shape; add load-bearing behavior as a new advertised method or explicitly gate new fields"
         );
