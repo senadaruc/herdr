@@ -121,7 +121,8 @@ impl HeadlessServer {
         }
         if matches!(
             &request.method,
-            api::schema::Method::AgentConversationRead(_)
+            api::schema::Method::AgentConversationJump(_)
+                | api::schema::Method::AgentConversationRead(_)
                 | api::schema::Method::AgentConversationBlockRead(_)
         ) {
             self.app

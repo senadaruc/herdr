@@ -76,6 +76,16 @@ pub(crate) struct WorktreeReadData {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    AgentHistoryJumpFinished {
+        terminal_id: String,
+        binding: crate::agent_history::binding::HistoryBinding,
+        request_id: String,
+        result: Result<
+            Box<crate::agent_history::jump::ConversationJumpCandidate>,
+            crate::agent_history::HistoryError,
+        >,
+        respond_to: std::sync::mpsc::Sender<String>,
+    },
     AgentHistoryReadFinished {
         terminal_id: String,
         binding: crate::agent_history::binding::HistoryBinding,

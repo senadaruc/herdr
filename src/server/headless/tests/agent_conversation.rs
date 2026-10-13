@@ -58,6 +58,25 @@ async fn conversation_endpoint_worker_preserves_foreground_and_terminal_geometry
             )
         })
         .collect::<HashMap<_, _>>();
+    let (runtime, mut input) =
+        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            40,
+            4,
+            1024 * 1024,
+            "❯ Explain the failing test 🌍\r\n\r\n⏺ Here is the reply.\r\nmore\r\nmore\r\nmore\r\nlatest\r\n"
+                .as_bytes(),
+            8,
+        );
+    server
+        .app
+        .terminal_runtimes
+        .insert(terminal_id.clone(), runtime);
+    let content_seq = server
+        .app
+        .terminal_runtimes
+        .get(&terminal_id)
+        .unwrap()
+        .content_seq();
     let runtimes = server.app.terminal_runtimes.len();
     assert!(
         !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
@@ -67,7 +86,7 @@ async fn conversation_endpoint_worker_preserves_foreground_and_terminal_geometry
                 id: "history-read".into(),
                 method: api::schema::Method::AgentConversationRead(
                     crate::agent_history::model::ConversationReadParams {
-                        target,
+                        target: target.clone(),
                         expected_session_id: "synthetic-session".into(),
                         window: crate::agent_history::model::Window::Latest,
                         limit: 100,
@@ -94,6 +113,56 @@ async fn conversation_endpoint_worker_preserves_foreground_and_terminal_geometry
     };
     let response: serde_json::Value = serde_json::from_slice(&data).unwrap();
     assert_eq!(response["result"]["availability"], "ready");
+    let message_revision = response["result"]["messages"][0]["message_revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let generation = response["result"]["binding"]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id: 7,
+            boot_id: server.client_shell_boot_id.clone(),
+            request: Box::new(api::schema::Request {
+                id: "history-jump".into(),
+                method: api::schema::Method::AgentConversationJump(
+                    crate::agent_history::model::ConversationJumpParams {
+                        target,
+                        expected_session_id: "synthetic-session".into(),
+                        expected_generation: generation,
+                        message_id: "human-1".into(),
+                        message_revision,
+                    }
+                ),
+            }),
+        })
+    );
+    let event = tokio::time::timeout(Duration::from_secs(10), server.app.event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(server.handle_internal_event_with_forwarding(event));
+    let ready = tokio::time::timeout(Duration::from_secs(10), server.server_event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!server.handle_server_event(ready));
+    let ServerMessage::ClientShellEndpointResponseChunk { data, .. } =
+        read_server_message(first_control.recv().unwrap())
+    else {
+        panic!("expected jump endpoint response");
+    };
+    let response: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(response["result"]["type"], "agent_conversation_jump");
+    assert!(response["result"]["offset_from_bottom"].as_u64().unwrap() > 0);
+    let runtime = server.app.terminal_runtimes.get(&terminal_id).unwrap();
+    assert_eq!(runtime.content_seq(), content_seq);
+    assert!(runtime
+        .visible_text()
+        .contains("❯ Explain the failing test 🌍"));
+    assert!(input.try_recv().is_err());
     assert_eq!(server.foreground_client_id, foreground);
     assert_eq!(server.app.terminal_runtimes.len(), runtimes);
     for (id, cols, rows, revision) in geometries.values() {

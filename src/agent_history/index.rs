@@ -1,3 +1,6 @@
+use super::jump::{
+    assistant_context_line, exact_prompt, validate_prompt, ExactHumanPrompt, JumpSourceGuard,
+};
 use super::{binding::HistoryBinding, claude, model::*, HistoryError};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -5,6 +8,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::SystemTime;
 
 const MAX_LINE: usize = 16 * 1024 * 1024;
@@ -21,6 +28,7 @@ struct Entry {
     parent: Option<String>,
     revision: String,
     human: bool,
+    prompt_fingerprint: Option<String>,
     preview: String,
     timestamp: Option<String>,
     order: usize,
@@ -34,6 +42,7 @@ struct Change {
 }
 #[derive(Default)]
 struct Source {
+    jump_revision: Arc<AtomicU64>,
     session_id: String,
     path: PathBuf,
     identity: Option<String>,
@@ -385,20 +394,131 @@ impl ConversationReader {
         source.verify_unchanged()?;
         Ok(result)
     }
+
+    pub(crate) fn exact_human_prompt(
+        &mut self,
+        binding: &HistoryBinding,
+        message_id: &str,
+        message_revision: &str,
+    ) -> Result<ExactHumanPrompt, HistoryError> {
+        let source = self.refresh(binding)?;
+        if source.unsupported || source.partial {
+            return Err(HistoryError::new("jump_unavailable","saved transcript includes unsupported or pending records; full prompt identity cannot be established"));
+        }
+        let message = source.message(message_id)?;
+        if message.message_revision != message_revision {
+            return Err(HistoryError::new(
+                "message_changed",
+                "saved message revision changed; reload history",
+            ));
+        }
+        let text = exact_prompt(&message).ok_or_else(|| {
+            HistoryError::new(
+                "jump_unavailable",
+                "only complete human text prompts can be matched to terminal rows",
+            )
+        })?;
+        validate_prompt(text)?;
+        let fingerprint = claude::digest(text.as_bytes());
+        // Includes abandoned branch entries: a single surviving terminal occurrence
+        // cannot identify repeated human prompts whose earlier occurrence was evicted.
+        if source
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.human && entry.prompt_fingerprint.as_deref() == Some(&fingerprint)
+            })
+            .count()
+            != 1
+        {
+            return Err(HistoryError::new(
+                "jump_ambiguous",
+                "repeated saved human prompts cannot be uniquely associated with terminal rows",
+            ));
+        }
+        let human_index = source
+            .order
+            .iter()
+            .position(|id| id == message_id)
+            .ok_or_else(|| {
+                HistoryError::new(
+                    "message_changed",
+                    "human message is no longer on the current branch",
+                )
+            })?;
+        let following = source
+            .order
+            .iter()
+            .skip(human_index + 1)
+            .take_while(|id| source.entries[*id].turn_id == message.turn_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut assistant_line = None;
+        for id in following {
+            let next = source.message(&id)?;
+            if next.role == "assistant" {
+                assistant_line = Some(assistant_context_line(&next)?);
+                break;
+            }
+        }
+        let assistant_line = assistant_line.ok_or_else(|| {
+            HistoryError::new(
+                "jump_unavailable",
+                "no supported assistant reply can verify this rendered human exchange",
+            )
+        })?;
+        source.verify_unchanged()?;
+        Ok(ExactHumanPrompt {
+            binding: binding.clone(),
+            message_id: message.id.clone(),
+            message_revision: message.message_revision.clone(),
+            text: text.into(),
+            assistant_line,
+            guard: JumpSourceGuard {
+                revision: source.jump_revision.clone(),
+                expected: source.jump_revision.load(Ordering::Acquire),
+            },
+        })
+    }
+    pub(crate) fn validate_jump_source(
+        &mut self,
+        prompt: &ExactHumanPrompt,
+    ) -> Result<(), HistoryError> {
+        let source = self.refresh(&prompt.binding)?;
+        prompt.guard.validate()?;
+        if !Arc::ptr_eq(&source.jump_revision, &prompt.guard.revision) {
+            return Err(HistoryError::new(
+                "source_changed",
+                "saved source identity was replaced",
+            ));
+        }
+        source.verify_unchanged()
+    }
     fn refresh(&mut self, binding: &HistoryBinding) -> Result<&mut Source, HistoryError> {
         let key = format!("{}:{}", binding.session_id, binding.generation);
         self.lru.retain(|k| k != &key);
         self.lru.push_back(key.clone());
         if !self.sources.contains_key(&key) && self.sources.len() >= MAX_SOURCES {
             if let Some(old) = self.lru.pop_front() {
-                self.sources.remove(&old);
+                if let Some(source) = self.sources.remove(&old) {
+                    source.jump_revision.store(u64::MAX, Ordering::Release);
+                }
             }
         }
         let source = self.sources.entry(key).or_insert_with(|| Source {
             epoch: next_epoch(),
             ..Source::default()
         });
-        source.refresh(binding)?;
+        if source.jump_revision.load(Ordering::Acquire) == u64::MAX {
+            *source = Source {
+                epoch: next_epoch(),
+                ..Source::default()
+            };
+        }
+        if let Err(error) = source.refresh(binding) {
+            source.jump_revision.store(u64::MAX, Ordering::Release);
+            return Err(error);
+        }
         Ok(source)
     }
 }
@@ -526,6 +646,8 @@ impl Source {
                             parent: message.parent_id.clone(),
                             revision: message.message_revision.clone(),
                             human: message.origin == "human",
+                            prompt_fingerprint: exact_prompt(&message)
+                                .map(|text| claude::digest(text.as_bytes())),
                             preview: message
                                 .blocks
                                 .iter()
@@ -613,6 +735,9 @@ impl Source {
         for id in changed {
             self.record_change(id, false);
         }
+        // Source guards cover physical transcript changes, including completeness-only
+        // updates; the public semantic revision remains independent.
+        self.jump_revision.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
     fn verify_unchanged(&self) -> Result<(), HistoryError> {
@@ -877,4 +1002,12 @@ fn char_floor(text: &str, mut position: usize) -> usize {
 fn next_epoch() -> u64 {
     static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Drop for ConversationReader {
+    fn drop(&mut self) {
+        for source in self.sources.values() {
+            source.jump_revision.store(u64::MAX, Ordering::Release);
+        }
+    }
 }

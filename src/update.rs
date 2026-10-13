@@ -3048,6 +3048,7 @@ mod tests {
             protocol: Some(2),
             capabilities: Some(crate::api::schema::ServerCapabilities {
                 agent_conversation_read: false,
+                agent_conversation_jump: false,
                 agent_conversation_block_read: false,
                 live_handoff: true,
                 detached_server_daemon: true,
@@ -3066,6 +3067,7 @@ mod tests {
         let incompatible_generation = crate::api::RuntimeStatus {
             capabilities: Some(crate::api::schema::ServerCapabilities {
                 agent_conversation_read: false,
+                agent_conversation_jump: false,
                 agent_conversation_block_read: false,
                 endpoint_protocol_generation: Some(
                     crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION + 1,
@@ -3127,6 +3129,7 @@ mod tests {
                 protocol: Some(76),
                 capabilities: Some(crate::api::schema::ServerCapabilities {
                     agent_conversation_read: false,
+                    agent_conversation_jump: false,
                     agent_conversation_block_read: false,
                     live_handoff: true,
                     detached_server_daemon: true,
@@ -3388,6 +3391,7 @@ mod tests {
                 protocol: Some(76),
                 capabilities: Some(crate::api::schema::ServerCapabilities {
                     agent_conversation_read: false,
+                    agent_conversation_jump: false,
                     agent_conversation_block_read: false,
                     live_handoff: true,
                     detached_server_daemon: true,

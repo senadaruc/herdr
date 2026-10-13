@@ -2657,8 +2657,7 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
 }
 
 #[test]
-fn claude_conversation_history_is_read_only_over_real_unix_api_socket() {
-    use std::os::unix::fs::PermissionsExt;
+fn claude_conversation_read_and_jump_use_exact_synthetic_rows_over_real_unix_api_socket() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -2677,8 +2676,30 @@ fn claude_conversation_history_is_read_only_over_real_unix_api_socket() {
     )
     .unwrap();
     let fake = bin.join("claude");
-    fs::write(&fake, "#!/bin/sh\nHERDR_AGENT=claude exec /bin/sleep 20\n").unwrap();
-    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let source = bin.join("synthetic-claude.c");
+    fs::write(
+        &source,
+        r#"#include <stdio.h>
+#include <unistd.h>
+int main(void) {
+    fputs("\033[2J\033[H❯ Explain the failing test 🌍\r\n\r\n⏺ Here is the reply.\r\n", stdout);
+    for (int i=0;i<48;i++) printf("synthetic retained reply row %02d\r\n",i);
+    fflush(stdout); sleep(120); return 0;
+}
+"#,
+    )
+    .unwrap();
+    let compiled = std::process::Command::new("/usr/bin/cc")
+        .args(["-O0", "-o"])
+        .arg(&fake)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "inert fixture compiler failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -2722,19 +2743,53 @@ fn claude_conversation_history_is_read_only_over_real_unix_api_socket() {
         .unwrap()
         .to_string();
     let terminal = workspace["result"]["root_pane"]["terminal_id"].clone();
+    let launch = format!("exec '{}'", fake.display());
+    let sent=send_request(&socket_path,&serde_json::json!({"id":"history-inert-launch","method":"pane.send_text","params":{"pane_id":pane,"text":launch}}).to_string());
+    assert_eq!(sent["result"]["type"], "ok");
+    let entered=send_request(&socket_path,&serde_json::json!({"id":"history-inert-enter","method":"pane.send_keys","params":{"pane_id":pane,"keys":["Enter"]}}).to_string());
+    assert_eq!(entered["result"]["type"], "ok");
     let deadline = Instant::now() + Duration::from_secs(8);
-    let start = loop {
-        let start=send_request(&socket_path,&serde_json::json!({"id":"history-fake-agent","method":"agent.start","params":{"name":"synthetic-claude","kind":"claude","pane_id":pane,"timeout_ms":8000}}).to_string());
-        if start["error"]["code"] != "agent_pane_busy" {
-            break start;
+    let inert_pid = loop {
+        let info=send_request(&socket_path,&serde_json::json!({"id":"history-inert-process","method":"pane.process_info","params":{"pane_id":pane}}).to_string());
+        if let Some(process) = info["result"]["process_info"]["foreground_processes"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find(|process| {
+                    process["argv0"].as_str() == fake.to_str()
+                        || process["argv"]
+                            .as_array()
+                            .and_then(|args| args.first())
+                            .and_then(serde_json::Value::as_str)
+                            == fake.to_str()
+                })
+            })
+        {
+            break process["pid"].as_u64().unwrap();
         }
         assert!(
             Instant::now() < deadline,
-            "synthetic shell never became available: {start}"
+            "absolute inert process never became foreground: {info}"
         );
         thread::sleep(Duration::from_millis(50));
     };
-    assert_eq!(start["result"]["type"], "agent_started", "{start}");
+    thread::sleep(Duration::from_millis(250));
+    assert_eq!(
+        unsafe { libc::kill(inert_pid as libc::pid_t, 0) },
+        0,
+        "inert synthetic process must remain alive"
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let info=send_request(&socket_path,&serde_json::json!({"id":"history-inert-detected","method":"pane.get","params":{"pane_id":pane}}).to_string());
+        if info["result"]["pane"]["agent"] == "claude" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "inert Claude-named executable was not detected: {info}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     let transcript = claude_root.join("synthetic-session.jsonl");
     fs::write(
         &transcript,
@@ -2747,6 +2802,35 @@ fn claude_conversation_history_is_read_only_over_real_unix_api_socket() {
     assert_eq!(read["result"]["availability"], "ready", "{read}");
     assert_eq!(read["result"]["messages"][0]["id"], "human-1");
     assert_eq!(read["result"]["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        ping["result"]["capabilities"]["agent_conversation_jump"],
+        true
+    );
+    let jump_params = serde_json::json!({"target":pane,"expected_session_id":"synthetic-session","expected_generation":read["result"]["binding"]["generation"],"message_id":"human-1","message_revision":read["result"]["messages"][0]["message_revision"]});
+    let jumped=send_request(&socket_path,&serde_json::json!({"id":"history-exact-jump","method":"agent.conversation.jump","params":jump_params}).to_string());
+    assert_eq!(
+        jumped["result"]["type"], "agent_conversation_jump",
+        "{jumped}"
+    );
+    assert!(jumped["result"]["offset_from_bottom"].as_u64().unwrap() > 0);
+    let viewport=send_request(&socket_path,&serde_json::json!({"id":"history-jumped-viewport","method":"pane.read","params":{"pane_id":pane,"source":"visible","format":"text"}}).to_string());
+    assert!(
+        viewport["result"]["read"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("❯ Explain the failing test 🌍"),
+        "{viewport}"
+    );
+    let mut stale = jump_params.clone();
+    stale["message_revision"] = "stale-revision".into();
+    let failed=send_request(&socket_path,&serde_json::json!({"id":"history-stale-jump","method":"agent.conversation.jump","params":stale}).to_string());
+    assert_eq!(failed["error"]["code"], "message_changed");
+    let preserved=send_request(&socket_path,&serde_json::json!({"id":"history-preserved-viewport","method":"pane.read","params":{"pane_id":pane,"source":"visible","format":"text"}}).to_string());
+    assert_eq!(
+        preserved["result"]["read"]["text"],
+        viewport["result"]["read"]["text"]
+    );
+    assert_eq!(unsafe { libc::kill(inert_pid as libc::pid_t, 0) }, 0);
     let search=send_request(&socket_path,&serde_json::json!({"id":"history-search","method":"agent.conversation.read","params":{"target":pane,"expected_session_id":"synthetic-session","window":{"kind":"search","query":"reply"}}}).to_string());
     assert_eq!(
         search["result"]["match_message_ids"],

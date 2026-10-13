@@ -224,6 +224,183 @@ pub(crate) struct PaneTerminal {
     pub(crate) ghostty: GhosttyPaneTerminal,
 }
 
+const CONVERSATION_SCAN_ROWS: usize = 20_000;
+const CONVERSATION_SCAN_CELLS: usize = 1_000_000;
+const CONVERSATION_SCAN_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) struct ConversationPromptRows {
+    pub cols: u16,
+    pub viewport_rows: u16,
+    pub total_rows: usize,
+    rows: Vec<crate::ghostty::ScreenTextRow>,
+}
+impl ConversationPromptRows {
+    pub fn locate(
+        &mut self,
+        prompt: &str,
+        assistant_line: &str,
+    ) -> Result<usize, crate::agent_history::HistoryError> {
+        let starts_in_continuation = self.rows.first().is_some_and(|row| row.wrap_continuation);
+        let buffer = RetainedTextBuffer::new_search(self.cols, std::mem::take(&mut self.rows), 0);
+        let parts: Vec<_> = prompt.split('\n').collect();
+        let mut matches = Vec::new();
+        for (start, line) in buffer.lines.iter().enumerate() {
+            let leading = line.text.len() - line.text.trim_start_matches(' ').len();
+            if leading > 2 || !line.text[leading..].starts_with("❯ ") {
+                continue;
+            }
+            let Some(row) = line.spans.first().map(|span| span.start.row as usize) else {
+                continue;
+            };
+            if row == 0 && starts_in_continuation {
+                continue;
+            }
+            if line.text[leading..] != format!("❯ {}", parts[0]) {
+                continue;
+            }
+            let indentation = " ".repeat(leading + 2);
+            // Claude separates a prompt and response with blank logical rows.
+            // Skip at most eight separators, then require the very next nonblank
+            // row to match the saved response. Never skip prompt continuation,
+            // quoted text or unrelated output while looking for that boundary.
+            let complete_end = buffer
+                .lines
+                .iter()
+                .skip(start + parts.len())
+                .take(9)
+                .find(|line| !line.text.is_empty())
+                .is_some_and(|line| {
+                    let reply = line
+                        .text
+                        .strip_prefix(&" ".repeat(leading))
+                        .unwrap_or(&line.text);
+                    reply == format!("⏺ {assistant_line}") || reply == format!("● {assistant_line}")
+                });
+            if complete_end
+                && parts.iter().enumerate().skip(1).all(|(index, text)| {
+                    buffer
+                        .lines
+                        .get(start + index)
+                        .is_some_and(|line| line.text == format!("{indentation}{text}"))
+                })
+            {
+                matches.push(row);
+            }
+        }
+        match matches.as_slice() {
+            [row] => Ok(*row),
+            [] => Err(crate::agent_history::HistoryError::new(
+                "jump_not_found",
+                "the complete Claude prompt is not visible in retained primary-screen rows",
+            )),
+            _ => Err(crate::agent_history::HistoryError::new(
+                "jump_ambiguous",
+                "multiple retained Claude prompt boundaries match this message",
+            )),
+        }
+    }
+}
+
+impl PaneTerminal {
+    pub(crate) fn conversation_prompt_rows(
+        &self,
+    ) -> Result<ConversationPromptRows, crate::agent_history::HistoryError> {
+        use crate::agent_history::HistoryError;
+        let core =
+            self.ghostty.core.lock().map_err(|_| {
+                HistoryError::new("terminal_changed", "terminal text is unavailable")
+            })?;
+        if core.terminal.active_screen().ok() != Some(crate::ghostty::ActiveScreen::Primary) {
+            return Err(HistoryError::new(
+                "alternate_screen",
+                "terminal jumps require the primary screen",
+            ));
+        }
+        let cols = core.terminal.cols().map_err(|_| {
+            HistoryError::new("terminal_changed", "terminal geometry is unavailable")
+        })?;
+        let viewport_rows = core.terminal.rows().map_err(|_| {
+            HistoryError::new("terminal_changed", "terminal geometry is unavailable")
+        })?;
+        let total_rows = core.terminal.total_rows().map_err(|_| {
+            HistoryError::new("terminal_changed", "retained terminal rows are unavailable")
+        })?;
+        if total_rows > CONVERSATION_SCAN_ROWS
+            || total_rows.saturating_mul(cols as usize) > CONVERSATION_SCAN_CELLS
+        {
+            return Err(HistoryError::new(
+                "scan_limit",
+                "retained terminal text exceeds the bounded jump scan limit",
+            ));
+        }
+        let rows = core
+            .terminal
+            .screen_text_rows_range(0, total_rows)
+            .map_err(|_| {
+                HistoryError::new(
+                    "terminal_changed",
+                    "retained terminal rows could not be copied",
+                )
+            })?;
+        if rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .map(|cell| cell.graphemes.len().saturating_mul(4))
+            .sum::<usize>()
+            > CONVERSATION_SCAN_BYTES
+        {
+            return Err(HistoryError::new(
+                "scan_limit",
+                "retained terminal glyphs exceed the bounded jump scan limit",
+            ));
+        }
+        Ok(ConversationPromptRows {
+            cols,
+            viewport_rows,
+            total_rows,
+            rows,
+        })
+    }
+    pub(crate) fn commit_conversation_prompt_row(
+        &self,
+        cols: u16,
+        rows: u16,
+        total_rows: usize,
+        source_row: usize,
+    ) -> Result<usize, crate::agent_history::HistoryError> {
+        use crate::agent_history::HistoryError;
+        let mut core = self.ghostty.core.try_lock().map_err(|_| {
+            HistoryError::new("content_changed", "terminal is busy; retry the jump")
+        })?;
+        if core.terminal.active_screen().ok() != Some(crate::ghostty::ActiveScreen::Primary) {
+            return Err(HistoryError::new(
+                "alternate_screen",
+                "terminal screen changed before the jump",
+            ));
+        }
+        if core.terminal.cols().ok() != Some(cols)
+            || core.terminal.rows().ok() != Some(rows)
+            || core.terminal.total_rows().ok() != Some(total_rows)
+        {
+            return Err(HistoryError::new(
+                "geometry_changed",
+                "terminal geometry or retained rows changed before the jump",
+            ));
+        }
+        if source_row >= total_rows {
+            return Err(HistoryError::new(
+                "jump_not_found",
+                "matching terminal row was evicted",
+            ));
+        }
+        let offset = total_rows
+            .saturating_sub(rows as usize)
+            .saturating_sub(source_row);
+        ghostty_set_scroll_offset_from_bottom(&mut core.terminal, offset);
+        Ok(offset)
+    }
+}
+
 impl PaneTerminal {
     pub(crate) fn new(ghostty: GhosttyPaneTerminal) -> Self {
         Self { ghostty }

@@ -21,6 +21,10 @@ impl App {
         request: Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
+        if let Method::AgentConversationJump(params) = request.method {
+            self.handle_deferred_conversation_jump(request.id, params, respond_to);
+            return;
+        }
         if request.id.len() > 384 {
             let _ = respond_to.send(encode_error(
                 request.id,
@@ -204,10 +208,197 @@ impl App {
     }
 }
 
+impl App {
+    fn handle_deferred_conversation_jump(
+        &mut self,
+        id: String,
+        params: ConversationJumpParams,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        use crate::agent_history::HistoryError;
+        if id.len() > 384
+            || params.message_id.len() > 512
+            || params.message_revision.len() > 128
+            || params.expected_generation.len() > 256
+            || params.expected_session_id.len() > 512
+        {
+            let _ = respond_to.send(encode_error(
+                id,
+                "invalid_params",
+                "conversation jump identity exceeds supported bounds",
+            ));
+            return;
+        }
+        let target = match self.resolve_agent_target(&params.target) {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = respond_to.send(encode_error_body(id, self.agent_target_error_body(error)));
+                return;
+            }
+        };
+        let Some(terminal) = self
+            .state
+            .terminals
+            .values()
+            .find(|terminal| terminal.id.to_string() == target.terminal_id)
+        else {
+            let _ = respond_to.send(encode_error(
+                id,
+                "terminal_changed",
+                "agent terminal is unavailable",
+            ));
+            return;
+        };
+        let Some(binding) = terminal.active_history_binding().cloned() else {
+            let _ = respond_to.send(encode_error(
+                id,
+                "no_binding",
+                "no exact saved conversation source is associated with this agent",
+            ));
+            return;
+        };
+        if binding.session_id != params.expected_session_id
+            || binding.generation != params.expected_generation
+        {
+            let _ = respond_to.send(encode_error(
+                id,
+                "session_changed",
+                "conversation association changed; reload history",
+            ));
+            return;
+        }
+        let Some(runtime) = self.terminal_runtimes.get(&terminal.id) else {
+            let _ = respond_to.send(encode_error(
+                id,
+                "terminal_changed",
+                "agent terminal runtime is unavailable",
+            ));
+            return;
+        };
+        let terminal_handle = runtime.conversation_terminal_handle();
+        if IN_FLIGHT
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 4).then_some(n + 1)
+            })
+            .is_err()
+        {
+            let _ = respond_to.send(encode_error(
+                id,
+                "busy",
+                "conversation worker is busy; retry shortly",
+            ));
+            return;
+        }
+        let tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let _slot = WorkerSlot;
+            let result = (|| {
+                let prompt = READER
+                    .get_or_init(|| Mutex::new(ConversationReader::default()))
+                    .lock()
+                    .map_err(|_| {
+                        HistoryError::new("source_changed", "conversation reader is unavailable")
+                    })?
+                    .exact_human_prompt(&binding, &params.message_id, &params.message_revision)?;
+                let anchor =
+                    terminal_handle.resolve_prompt(&prompt.text, &prompt.assistant_line)?;
+                // Revalidate the transcript after terminal scanning, still on this worker.
+                READER
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .map_err(|_| {
+                        HistoryError::new("source_changed", "conversation reader is unavailable")
+                    })?
+                    .validate_jump_source(&prompt)?;
+                Ok(Box::new(
+                    crate::agent_history::jump::ConversationJumpCandidate {
+                        binding: binding.clone(),
+                        message_id: prompt.message_id,
+                        message_revision: prompt.message_revision,
+                        source_guard: prompt.guard,
+                        anchor,
+                    },
+                ))
+            })();
+            let _ = tx.blocking_send(crate::events::AppEvent::AgentHistoryJumpFinished {
+                terminal_id: target.terminal_id,
+                binding,
+                request_id: id,
+                result,
+                respond_to,
+            });
+        });
+    }
+    pub(super) fn finish_history_jump(
+        &mut self,
+        terminal_id: &str,
+        binding: &crate::agent_history::binding::HistoryBinding,
+        request_id: String,
+        result: Result<
+            Box<crate::agent_history::jump::ConversationJumpCandidate>,
+            crate::agent_history::HistoryError,
+        >,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) -> bool {
+        use crate::agent_history::HistoryError;
+        let outcome: Result<ConversationJumpResult, HistoryError> = (|| {
+            let candidate = result?;
+            let terminal = self
+                .state
+                .terminals
+                .values()
+                .find(|terminal| terminal.id.to_string() == terminal_id)
+                .ok_or_else(|| {
+                    HistoryError::new(
+                        "terminal_changed",
+                        "agent terminal was removed before the jump",
+                    )
+                })?;
+            let runtime = self.terminal_runtimes.get(&terminal.id).ok_or_else(|| {
+                HistoryError::new(
+                    "terminal_changed",
+                    "agent terminal runtime was removed before the jump",
+                )
+            })?;
+            let offset = runtime.commit_conversation_jump(&candidate.anchor, || {
+                if terminal.active_history_binding() != Some(binding)
+                    || candidate.binding != *binding
+                {
+                    return Err(HistoryError::new(
+                        "session_changed",
+                        "conversation association changed before the jump",
+                    ));
+                }
+                candidate.source_guard.validate()
+            })?;
+            Ok(ConversationJumpResult {
+                binding: binding.public(),
+                message_id: candidate.message_id,
+                message_revision: candidate.message_revision,
+                content_seq: candidate.anchor.content_seq,
+                source_row: candidate.anchor.source_row as u64,
+                offset_from_bottom: offset as u64,
+            })
+        })();
+        let changed = outcome.is_ok();
+        let response = match outcome {
+            Ok(jump) => encode_success(request_id, ResponseResult::AgentConversationJump { jump }),
+            Err(error) => encode_error(request_id, &error.code, error.message),
+        };
+        let _ = respond_to.send(response);
+        if changed {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn app_fixture() -> (App, String, crate::terminal::TerminalId) {
+    pub(super) fn app_fixture() -> (App, String, crate::terminal::TerminalId) {
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -227,7 +418,7 @@ mod tests {
         let target = app.public_pane_id(0, pane).unwrap();
         (app, target, id)
     }
-    fn set_session(app: &mut App, id: &crate::terminal::TerminalId, session: &str) {
+    pub(super) fn set_session(app: &mut App, id: &crate::terminal::TerminalId, session: &str) {
         app.state
             .terminals
             .get_mut(id)
@@ -450,3 +641,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "agent_history_jump_tests.rs"]
+mod jump_tests;

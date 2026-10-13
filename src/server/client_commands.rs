@@ -264,6 +264,10 @@ mod tests {
             Some("a542322d4a1db2763d5d06fd60d63678eb0fb9b6c36a5d730de91012b1e6647c")
         );
         assert_eq!(
+            actual.remove("agent.conversation.jump").as_deref(),
+            Some("b66254a491a88bee959c40f4dfa2158936bcfb2a9bc7cbb3f56b9121eba45baf")
+        );
+        assert_eq!(
             actual, expected,
             "an existing endpoint method changed shape; add load-bearing behavior as a new advertised method or explicitly gate new fields"
         );

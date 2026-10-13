@@ -173,3 +173,22 @@ pub struct BlockPage {
     pub slice_index: usize,
     pub next_cursor: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationJumpParams {
+    pub target: String,
+    pub expected_session_id: String,
+    pub expected_generation: String,
+    pub message_id: String,
+    pub message_revision: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationJumpResult {
+    pub binding: ConversationBinding,
+    pub message_id: String,
+    pub message_revision: String,
+    pub content_seq: u64,
+    pub source_row: u64,
+    pub offset_from_bottom: u64,
+}

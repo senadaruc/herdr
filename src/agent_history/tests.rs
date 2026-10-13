@@ -799,3 +799,221 @@ fn turn_index_budget_cannot_return_an_empty_nonadvancing_cursor() {
         1
     );
 }
+
+#[test]
+fn conversation_jump_source_rejects_revisions_duplicates_attachments_and_evicted_guards() {
+    let fixture = Fixture::new(&record(
+        "root",
+        None,
+        "user",
+        "Exact unique 🌍 prompt".into(),
+    ));
+    fixture.append(&record(
+        "context",
+        Some("root"),
+        "assistant",
+        "plain reply".into(),
+    ));
+    let mut reader = ConversationReader::default();
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    let revision = page.messages[0].message_revision.clone();
+    let prompt = reader
+        .exact_human_prompt(&fixture.binding, "root", &revision)
+        .unwrap();
+    assert_eq!(prompt.text, "Exact unique 🌍 prompt");
+    prompt.guard.validate().unwrap();
+    assert_eq!(
+        reader
+            .exact_human_prompt(&fixture.binding, "root", "stale")
+            .err()
+            .unwrap()
+            .code,
+        "message_changed"
+    );
+    fixture.append(&record(
+        "again",
+        Some("root"),
+        "user",
+        "Exact unique 🌍 prompt".into(),
+    ));
+    assert_eq!(
+        reader
+            .exact_human_prompt(&fixture.binding, "root", &revision)
+            .err()
+            .unwrap()
+            .code,
+        "jump_ambiguous"
+    );
+    assert_eq!(prompt.guard.validate().unwrap_err().code, "source_changed");
+    let attachment = Fixture::new(&record(
+        "image",
+        None,
+        "user",
+        serde_json::json!([{"type":"image","source":{"type":"base64","data":"SYNTHETIC_BODY"}}]),
+    ));
+    let page = reader
+        .read(&attachment.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(
+        reader
+            .exact_human_prompt(
+                &attachment.binding,
+                "image",
+                &page.messages[0].message_revision
+            )
+            .err()
+            .unwrap()
+            .code,
+        "jump_unavailable"
+    );
+    let unique = Fixture::new(&record("unique", None, "user", "distinct prompt".into()));
+    unique.append(&record(
+        "context",
+        Some("unique"),
+        "assistant",
+        "plain reply".into(),
+    ));
+    let page = reader
+        .read(&unique.binding, Window::Latest, Limits::default())
+        .unwrap();
+    let guarded = reader
+        .exact_human_prompt(
+            &unique.binding,
+            "unique",
+            &page.messages[0].message_revision,
+        )
+        .unwrap();
+    let mut additional = Vec::new();
+    for i in 0..4 {
+        let new = Fixture::new(&record(
+            &format!("other-{i}"),
+            None,
+            "user",
+            format!("other prompt {i}").into(),
+        ));
+        reader
+            .read(&new.binding, Window::Latest, Limits::default())
+            .unwrap();
+        additional.push(new);
+    }
+    assert_eq!(guarded.guard.validate().unwrap_err().code, "source_changed");
+}
+#[test]
+fn conversation_jump_source_rewrite_after_read_cannot_pass_worker_validation() {
+    let fixture = Fixture::new(&record("root", None, "user", "original".into()));
+    fixture.append(&record(
+        "context",
+        Some("root"),
+        "assistant",
+        "plain reply".into(),
+    ));
+    let mut reader = ConversationReader::default();
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    let prompt = reader
+        .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+        .unwrap();
+    std::fs::write(
+        &fixture.path,
+        record("root", None, "user", "replacement".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        reader.validate_jump_source(&prompt).unwrap_err().code,
+        "source_changed"
+    );
+    assert_eq!(prompt.guard.validate().unwrap_err().code, "source_changed");
+}
+
+#[test]
+fn conversation_jump_refuses_pending_or_unsupported_records_and_invalidates_completeness_changes() {
+    let fixture = Fixture::new(&record("root", None, "user", "original".into()));
+    fixture.append(&record(
+        "context",
+        Some("root"),
+        "assistant",
+        "plain reply".into(),
+    ));
+    let mut reader = ConversationReader::default();
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    let prompt = reader
+        .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+        .unwrap();
+    fixture.append("{\"pending\"");
+    assert_eq!(
+        reader.validate_jump_source(&prompt).unwrap_err().code,
+        "source_changed"
+    );
+    assert_eq!(
+        reader
+            .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+            .err()
+            .unwrap()
+            .code,
+        "jump_unavailable"
+    );
+    std::fs::write(
+        &fixture.path,
+        record("root", None, "user", "original".into()) + "unsupported-complete-record\n",
+    )
+    .unwrap();
+    assert_eq!(
+        reader
+            .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+            .err()
+            .unwrap()
+            .code,
+        "jump_unavailable"
+    );
+}
+
+#[test]
+fn conversation_jump_requires_supported_exact_assistant_context_for_selected_turn() {
+    for reply in [
+        None,
+        Some(serde_json::json!("**Markdown reply**")),
+        Some(serde_json::json!([{"type":"tool_use","id":"tool","name":"Read","input":{}}])),
+    ] {
+        let fixture = Fixture::new(&record("root", None, "user", "plain prompt".into()));
+        if let Some(reply) = reply {
+            fixture.append(&record("reply", Some("root"), "assistant", reply));
+        }
+        let mut reader = ConversationReader::default();
+        let page = reader
+            .read(&fixture.binding, Window::Latest, Limits::default())
+            .unwrap();
+        assert_eq!(
+            reader
+                .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+                .err()
+                .unwrap()
+                .code,
+            "jump_unavailable"
+        );
+    }
+    let fixture = Fixture::new(
+        &(record("root", None, "user", "plain prompt".into())
+            + &record(
+                "reply",
+                Some("root"),
+                "assistant",
+                "Exact visible Unicode 界 reply\nnext line".into(),
+            )),
+    );
+    let mut reader = ConversationReader::default();
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(
+        reader
+            .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+            .unwrap()
+            .assistant_line,
+        "Exact visible Unicode 界 reply"
+    );
+}

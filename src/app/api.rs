@@ -30,6 +30,13 @@ enum RuntimeExitAction {
 impl App {
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::AgentHistoryJumpFinished {
+                terminal_id,
+                binding,
+                request_id,
+                result,
+                respond_to,
+            } => self.finish_history_jump(&terminal_id, &binding, request_id, result, respond_to),
             ev @ AppEvent::AgentHistoryReadFinished { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -95,6 +102,17 @@ impl App {
         &mut self,
         ev: AppEvent,
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
+        if let AppEvent::AgentHistoryJumpFinished {
+            terminal_id,
+            binding,
+            request_id,
+            result,
+            respond_to,
+        } = ev
+        {
+            self.finish_history_jump(&terminal_id, &binding, request_id, result, respond_to);
+            return Vec::new();
+        }
         if let AppEvent::AgentHistoryReadFinished {
             terminal_id,
             binding,
@@ -1151,7 +1169,9 @@ impl App {
                     "agent.wait is handled by the api server",
                 );
             }
-            Method::AgentConversationRead(_) | Method::AgentConversationBlockRead(_) => {
+            Method::AgentConversationJump(_)
+            | Method::AgentConversationRead(_)
+            | Method::AgentConversationBlockRead(_) => {
                 return responses::encode_error(
                     request.id,
                     "background_dispatch_required",

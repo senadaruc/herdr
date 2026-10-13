@@ -1540,6 +1540,7 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::AgentHistoryJumpFinished { .. } => Vec::new(),
             AppEvent::AgentHistoryReadFinished { .. } => Vec::new(),
             AppEvent::AgentSessionReported {
                 pane_id,

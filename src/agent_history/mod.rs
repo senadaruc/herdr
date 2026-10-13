@@ -2,6 +2,7 @@
 pub mod binding;
 mod claude;
 mod index;
+pub(crate) mod jump;
 pub mod model;
 pub use index::ConversationReader;
 

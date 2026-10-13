@@ -173,6 +173,7 @@ mod tests {
             "tab.close",
             "layout.apply",
             "layout.set_split_ratio",
+            "agent.conversation.jump",
             "agent.rename",
             "agent.view.set",
             "agent.view.clear",

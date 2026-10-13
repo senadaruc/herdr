@@ -44,6 +44,8 @@ pub struct ServerCapabilities {
     #[serde(default)]
     pub agent_conversation_read: bool,
     #[serde(default)]
+    pub agent_conversation_jump: bool,
+    #[serde(default)]
     pub agent_conversation_block_read: bool,
     #[serde(default)]
     pub detached_server_daemon: bool,
