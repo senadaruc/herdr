@@ -2,6 +2,7 @@
 use super::{model::*, HistoryError};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -37,49 +38,132 @@ pub(crate) fn parse_record(line: &[u8], session: &str) -> Result<ParsedRecord, H
     {
         return Ok(ParsedRecord::default());
     }
-    if record.get("type").and_then(Value::as_str) == Some("attachment") {
-        if record.get("sessionId").and_then(Value::as_str) != Some(session) {
-            return Err(HistoryError::new(
-                "session_changed",
-                "transcript does not confirm the exact reported session",
-            ));
-        }
-        if record.get("isSidechain").and_then(Value::as_bool) != Some(false)
-            || !record.get("attachment").is_some_and(Value::is_object)
-        {
+    let kind = record.get("type").and_then(Value::as_str);
+    if kind == Some("attachment") {
+        let parent_link = ancestry_link(&record, session)?;
+        if !record.get("attachment").is_some_and(Value::is_object) {
             return Err(HistoryError::new(
                 "unsupported_schema",
                 "attachment ancestry is not a supported main-chain record",
             ));
         }
-        let stable_id = |value: &str| {
-            !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
-        };
-        let id = optional_string(&record, "uuid")
-            .filter(|value| stable_id(value))
-            .ok_or_else(|| {
-                HistoryError::new("unsupported_schema", "attachment has no stable ID")
-            })?;
-        let parent = match record.get("parentUuid") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(value)) if stable_id(value) => Some(value.clone()),
-            _ => {
-                return Err(HistoryError::new(
-                    "unsupported_schema",
-                    "attachment has no supported parent ID",
-                ));
-            }
-        };
-        // Only IDs enter the ancestry index; attachment bodies are never normalized or cached.
         return Ok(ParsedRecord {
             message: None,
-            parent_link: Some(ParentLink { id, parent }),
+            parent_link: Some(parent_link),
+        });
+    }
+    if kind == Some("system")
+        && matches!(
+            record.get("subtype").and_then(Value::as_str),
+            Some("stop_hook_summary" | "turn_duration")
+        )
+        && system_content(&record).is_none()
+    {
+        if record
+            .get("message")
+            .is_some_and(|message| !message.is_null() && !message.is_object())
+        {
+            return Err(HistoryError::new(
+                "unsupported_schema",
+                "system event has unsupported message encoding",
+            ));
+        }
+        return Ok(ParsedRecord {
+            message: None,
+            parent_link: Some(ancestry_link(&record, session)?),
+        });
+    }
+    if kind.is_some_and(known_metadata) {
+        // Most metadata has no ancestry envelope. Never derive links from payload IDs.
+        let has_envelope = record.get("uuid").is_some()
+            && record.get("parentUuid").is_some()
+            && record.get("sessionId").is_some()
+            && record.get("isSidechain").and_then(Value::as_bool) == Some(false);
+        return Ok(ParsedRecord {
+            message: None,
+            parent_link: has_envelope
+                .then(|| ancestry_link(&record, session))
+                .transpose()?,
         });
     }
     Ok(ParsedRecord {
         message: normalize_record(record, session)?,
         parent_link: None,
     })
+}
+
+fn ancestry_link(record: &Value, session: &str) -> Result<ParentLink, HistoryError> {
+    if record.get("sessionId").and_then(Value::as_str) != Some(session) {
+        return Err(HistoryError::new(
+            "session_changed",
+            "transcript does not confirm the exact reported session",
+        ));
+    }
+    if record.get("isSidechain").and_then(Value::as_bool) != Some(false) {
+        return Err(HistoryError::new(
+            "unsupported_schema",
+            "nonvisible ancestry is not a supported main-chain record",
+        ));
+    }
+    let stable_id = |value: &str| {
+        !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+    };
+    let id = optional_string(record, "uuid")
+        .filter(|value| stable_id(value))
+        .ok_or_else(|| {
+            HistoryError::new("unsupported_schema", "ancestry record has no stable ID")
+        })?;
+    let parent = match record.get("parentUuid") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if stable_id(value) => Some(value.clone()),
+        _ => {
+            return Err(HistoryError::new(
+                "unsupported_schema",
+                "ancestry record has no supported parent ID",
+            ));
+        }
+    };
+    // Only IDs enter the ancestry index; hidden event bodies are never cached or normalized.
+    Ok(ParentLink { id, parent })
+}
+
+fn known_metadata(kind: &str) -> bool {
+    matches!(
+        kind,
+        "summary"
+            | "file-history-snapshot"
+            | "file-history-delta"
+            | "progress"
+            | "queue-operation"
+            | "last-prompt"
+            | "custom-title"
+            | "ai-title"
+            | "agent-name"
+            | "agent-color"
+            | "session-info"
+            | "mode"
+            | "permission-mode"
+            | "atis-latch"
+            | "bridge-session"
+            | "pr-link"
+            | "cost-state"
+            | "frame-link"
+            | "artifact-comment-monitor"
+            | "artifact-autoreact-ledger"
+            | "history-suppression"
+    )
+}
+
+fn system_content(record: &Value) -> Option<&Value> {
+    record
+        .get("content")
+        .filter(|content| !content.is_null())
+        .or_else(|| {
+            record
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .filter(|content| !content.is_null())
+        })
 }
 
 fn normalize_record(
@@ -93,25 +177,10 @@ fn normalize_record(
         )
     })?;
     if !matches!(kind, "user" | "assistant" | "system") {
-        return match kind {
-            "summary"
-            | "file-history-snapshot"
-            | "progress"
-            | "queue-operation"
-            | "last-prompt"
-            | "custom-title"
-            | "agent-name"
-            | "agent-color"
-            | "session-info"
-            | "mode"
-            | "permission-mode"
-            | "atis-latch"
-            | "bridge-session" => Ok(None),
-            _ => Err(HistoryError::new(
-                "unsupported_schema",
-                "unknown transcript record type",
-            )),
-        };
+        return Err(HistoryError::new(
+            "unsupported_schema",
+            "unknown transcript record type",
+        ));
     }
     if record.get("sessionId").and_then(Value::as_str) != Some(session) {
         return Err(HistoryError::new(
@@ -137,9 +206,7 @@ fn normalize_record(
         ));
     }
     let content = if kind == "system" {
-        record
-            .get("content")
-            .or_else(|| record.get("message").and_then(|m| m.get("content")))
+        system_content(&record)
     } else {
         record.get("message").and_then(|m| m.get("content"))
     };
@@ -316,9 +383,22 @@ fn visible_tool_text(content: Option<&Value>) -> String {
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|item| match item.get("type").and_then(Value::as_str) {
-                Some("text") => item.get("text").and_then(Value::as_str),
-                Some("image") => Some("[Image attachment]"),
-                Some("document") => Some("[Document attachment]"),
+                Some("text") => item.get("text").and_then(Value::as_str).map(Cow::Borrowed),
+                Some("image") => Some(Cow::Borrowed("[Image attachment]")),
+                Some("document") => Some(Cow::Borrowed("[Document attachment]")),
+                Some("tool_reference") => Some(Cow::Owned(
+                    item.get("tool_name")
+                        .and_then(Value::as_str)
+                        .filter(|name| {
+                            !name.is_empty()
+                                && name.len() <= 512
+                                && !name.chars().any(char::is_control)
+                        })
+                        .map_or_else(
+                            || "Tool reference".into(),
+                            |name| format!("Tool reference: {name}"),
+                        ),
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>()

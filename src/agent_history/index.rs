@@ -590,7 +590,7 @@ impl Source {
             .filter_map(|id| {
                 self.entries
                     .get(id)
-                    .map(|e| (id.clone(), e.revision.clone()))
+                    .map(|e| (id.clone(), (e.revision.clone(), e.order, e.turn_id.clone())))
             })
             .collect();
         file.seek(SeekFrom::Start(self.complete_offset))?;
@@ -731,7 +731,13 @@ impl Source {
         let current: HashMap<_, _> = self
             .order
             .iter()
-            .map(|id| (id.clone(), self.entries[id].revision.clone()))
+            .map(|id| {
+                let entry = &self.entries[id];
+                (
+                    id.clone(),
+                    (entry.revision.clone(), entry.order, entry.turn_id.clone()),
+                )
+            })
             .collect();
         let removed: Vec<_> = old
             .keys()

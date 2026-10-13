@@ -59,6 +59,480 @@ fn changed_record(line: &str, key: &str, value: serde_json::Value) -> String {
     format!("{record}\n")
 }
 
+fn system_event_record(id: &str, parent: Option<&str>, subtype: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type":"system", "subtype":subtype, "uuid":id, "parentUuid":parent,
+            "sessionId":"synthetic-session", "isSidechain":false,
+            "hookInfos":[{"command":"HIDDEN_HOOK_COMMAND", "output":"HIDDEN_HOOK_INFO"}],
+            "hookAdditionalContext":"HIDDEN_HOOK_CONTEXT", "durationMs":10
+        })
+    )
+}
+
+#[test]
+fn content_free_system_events_preserve_oldest_turn_paging_search_and_changes() {
+    let fixture = Fixture::new(
+        &(record("u1", None, "user", "first question".into())
+            + &record("r1", Some("u1"), "assistant", "first reply".into())),
+    );
+    let mut reader = ConversationReader::default();
+    let first = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    fixture.append(
+        &(system_event_record("stop", Some("r1"), "stop_hook_summary")
+            + &system_event_record("duration", Some("stop"), "turn_duration")
+            + &record("u2", Some("duration"), "user", "second question".into())
+            + &record("r2", Some("u2"), "assistant", "second reply".into())),
+    );
+    let limits = Limits {
+        limit: 2,
+        ..Limits::default()
+    };
+    let latest = reader
+        .read(&fixture.binding, Window::Latest, limits)
+        .unwrap();
+    assert_eq!(latest.completeness, "source_available");
+    assert_eq!(
+        latest
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["u2", "r2"]
+    );
+    assert_eq!(
+        latest
+            .turns
+            .iter()
+            .map(|turn| turn.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["u1", "u2"]
+    );
+    let oldest = reader
+        .read(
+            &fixture.binding,
+            Window::Before {
+                cursor: latest.before_cursor.unwrap(),
+            },
+            limits,
+        )
+        .unwrap();
+    assert_eq!(
+        oldest
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["u1", "r1"]
+    );
+    assert!(oldest
+        .messages
+        .iter()
+        .all(|message| message.turn_id == "turn:u1"));
+    let around = reader
+        .read(
+            &fixture.binding,
+            Window::Around {
+                message_id: "u1".into(),
+            },
+            limits,
+        )
+        .unwrap();
+    assert_eq!(around.messages[0].id, "u1");
+    let search = reader
+        .read(
+            &fixture.binding,
+            Window::Search {
+                query: "first question".into(),
+                cursor: None,
+            },
+            limits,
+        )
+        .unwrap();
+    assert_eq!(search.match_message_ids, ["u1"]);
+    let changes = reader
+        .read(
+            &fixture.binding,
+            Window::Changes {
+                cursor: first.changes_cursor.unwrap(),
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        changes
+            .upserts
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["u2", "r2"]
+    );
+    assert!(!serde_json::to_string(&changes).unwrap().contains("HIDDEN_"));
+    assert!(reader
+        .read(
+            &fixture.binding,
+            Window::Search {
+                query: "HIDDEN_".into(),
+                cursor: None
+            },
+            Limits::default()
+        )
+        .unwrap()
+        .match_message_ids
+        .is_empty());
+    let prompt = reader
+        .exact_human_prompt(&fixture.binding, "u1", &oldest.messages[0].message_revision)
+        .unwrap();
+    assert_eq!(prompt.assistant_line, "first reply");
+}
+
+#[test]
+fn observed_nonmessage_metadata_shapes_never_expose_payloads_or_fabricate_turns() {
+    let records = [
+        serde_json::json!({"type":"file-history-delta", "backup":{"path":"HIDDEN_BACKUP"}, "messageId":"u1", "snapshotMessageId":"HIDDEN_SNAPSHOT", "timestamp":"generated", "trackingPath":"HIDDEN_TRACKING_PATH"}),
+        serde_json::json!({"type":"ai-title", "aiTitle":"HIDDEN_AI_TITLE", "sessionId":"synthetic-session"}),
+        serde_json::json!({"type":"pr-link", "prNumber":1, "prRepository":"HIDDEN_PR_REPOSITORY", "prUrl":"HIDDEN_PR_URL", "sessionId":"synthetic-session", "timestamp":"generated"}),
+        serde_json::json!({"type":"cost-state", "modelUsage":{"HIDDEN_MODEL_ACCOUNT":{}}, "sessionId":"synthetic-session", "startTime":0, "totalAPIDuration":1, "totalAPIDurationWithoutRetries":1, "totalCostUSD":0, "totalDuration":1, "totalLinesAdded":1, "totalLinesRemoved":0, "totalToolDuration":1, "hasUnknownModelCost":false}),
+        serde_json::json!({"type":"frame-link", "artifactCount":1, "frameUrl":"HIDDEN_FRAME_URL", "path":"HIDDEN_FRAME_PATH", "sessionId":"synthetic-session", "timestamp":"generated", "title":"HIDDEN_FRAME_TITLE"}),
+        serde_json::json!({"type":"artifact-comment-monitor", "artifacts":["HIDDEN_COMMENT_BODY"], "sessionId":"synthetic-session", "v":1}),
+        serde_json::json!({"type":"artifact-autoreact-ledger", "accountUuid":"HIDDEN_ACCOUNT_UUID", "artifacts":["HIDDEN_ARTIFACT"], "sessionId":"synthetic-session", "v":1}),
+        serde_json::json!({"type":"history-suppression", "cause":"HIDDEN_SUPPRESSION_CAUSE", "sessionId":"synthetic-session", "ts":1, "vetoedAgainstAccountUuid":"HIDDEN_VETO_ACCOUNT"}),
+    ];
+    let fixture = Fixture::new(&record("u1", None, "user", "question".into()));
+    let mut reader = ConversationReader::default();
+    let first = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    for metadata in records {
+        let line = format!("{metadata}\n");
+        assert!(claude::normalize(line.as_bytes(), "synthetic-session")
+            .unwrap()
+            .is_none());
+        fixture.append(&line);
+    }
+    fixture.append(&record("r1", Some("u1"), "assistant", "reply".into()));
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(page.completeness, "source_available");
+    assert_eq!(page.messages.len(), 2);
+    assert_eq!(page.turns.len(), 1);
+    assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+    let changes = reader
+        .read(
+            &fixture.binding,
+            Window::Changes {
+                cursor: first.changes_cursor.unwrap(),
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(changes.upserts.len(), 1);
+    assert_eq!(changes.upserts[0].id, "r1");
+    assert!(!serde_json::to_string(&changes).unwrap().contains("HIDDEN_"));
+    assert!(reader
+        .read(
+            &fixture.binding,
+            Window::Search {
+                query: "HIDDEN_".into(),
+                cursor: None
+            },
+            Limits::default()
+        )
+        .unwrap()
+        .match_message_ids
+        .is_empty());
+}
+
+#[test]
+fn system_content_null_falls_back_but_invalid_content_is_not_hidden() {
+    for subtype in ["stop_hook_summary", "turn_duration"] {
+        let event = system_event_record("system", None, subtype);
+        assert!(claude::normalize(event.as_bytes(), "synthetic-session")
+            .unwrap()
+            .is_none());
+        let event = changed_record(&event, "content", serde_json::Value::Null);
+        let nested = changed_record(
+            &event,
+            "message",
+            serde_json::json!({"role":"system", "content":[{"type":"text", "text":"visible diagnostic"}]}),
+        );
+        let normalized = claude::normalize(nested.as_bytes(), "synthetic-session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(normalized.origin, "system");
+        assert_eq!(
+            normalized.blocks[0].text.as_deref(),
+            Some("visible diagnostic")
+        );
+        assert!(!serde_json::to_string(&normalized)
+            .unwrap()
+            .contains("HIDDEN_"));
+        let bearing = changed_record(&event, "content", "visible system text".into());
+        assert_eq!(
+            claude::normalize(bearing.as_bytes(), "synthetic-session")
+                .unwrap()
+                .unwrap()
+                .blocks[0]
+                .text
+                .as_deref(),
+            Some("visible system text")
+        );
+        for invalid in [
+            true.into(),
+            3.into(),
+            serde_json::json!({"bad":"HIDDEN_CONTENT"}),
+        ] {
+            assert_eq!(
+                claude::normalize(
+                    changed_record(&nested, "content", invalid).as_bytes(),
+                    "synthetic-session"
+                )
+                .unwrap_err()
+                .code,
+                "unsupported_schema"
+            );
+        }
+        assert_eq!(
+            claude::normalize(
+                changed_record(&event, "message", "HIDDEN_INVALID_MESSAGE".into()).as_bytes(),
+                "synthetic-session"
+            )
+            .unwrap_err()
+            .code,
+            "unsupported_schema"
+        );
+    }
+    let unknown = system_event_record("unknown", None, "unknown_system_event");
+    assert_eq!(
+        claude::normalize(unknown.as_bytes(), "synthetic-session")
+            .unwrap_err()
+            .code,
+        "unsupported_schema"
+    );
+}
+
+#[test]
+fn content_free_system_links_require_exact_valid_mainchain_identity() {
+    for subtype in ["stop_hook_summary", "turn_duration"] {
+        let event = system_event_record("bridge", Some("u1"), subtype);
+        assert_eq!(
+            claude::normalize(
+                changed_record(&event, "sessionId", "foreign".into()).as_bytes(),
+                "synthetic-session"
+            )
+            .unwrap_err()
+            .code,
+            "session_changed"
+        );
+        for (key, invalid) in [
+            ("uuid", "x".repeat(513).into()),
+            ("uuid", "bad\nuuid".into()),
+            ("uuid", serde_json::Value::Null),
+            ("parentUuid", "x".repeat(513).into()),
+            ("parentUuid", serde_json::json!(["u1"])),
+            ("isSidechain", serde_json::Value::Null),
+        ] {
+            let malformed = changed_record(&event, key, invalid);
+            assert_eq!(
+                claude::normalize(malformed.as_bytes(), "synthetic-session")
+                    .unwrap_err()
+                    .code,
+                "unsupported_schema"
+            );
+            let fixture =
+                Fixture::new(&(record("u1", None, "user", "question".into()) + &malformed));
+            assert_eq!(
+                ConversationReader::default()
+                    .read(&fixture.binding, Window::Latest, Limits::default())
+                    .unwrap()
+                    .completeness,
+                "partial_unsupported_records"
+            );
+        }
+        for ignored in [
+            changed_record(&event, "isSidechain", true.into()),
+            changed_record(&event, "agentId", "subagent".into()),
+        ] {
+            let fixture = Fixture::new(
+                &(record("u1", None, "user", "question".into())
+                    + &ignored
+                    + &record("r1", Some("bridge"), "assistant", "reply".into())
+                    + &record("r2", Some("r1"), "assistant", "final".into())),
+            );
+            let page = ConversationReader::default()
+                .read(&fixture.binding, Window::Latest, Limits::default())
+                .unwrap();
+            assert!(page.turns.is_empty());
+            assert!(page.messages.iter().all(|message| message.id != "u1"));
+            assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+        }
+    }
+}
+
+#[test]
+fn known_metadata_ancestry_requires_complete_envelope_and_replays_turn_reparenting() {
+    let link = changed_record(
+        &system_event_record("bridge", Some("u1"), "stop_hook_summary"),
+        "type",
+        "ai-title".into(),
+    );
+    let fixture = Fixture::new(
+        &(record("u1", None, "user", "first question".into())
+            + &record("u2", None, "user", "second question".into())
+            + &link
+            + &record("r1", Some("bridge"), "assistant", "reply".into())),
+    );
+    let mut reader = ConversationReader::default();
+    let first = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(first.turns[0].message_id, "u1");
+    let original_prompt = reader
+        .exact_human_prompt(&fixture.binding, "u1", &first.messages[0].message_revision)
+        .unwrap();
+    fixture.append(&changed_record(&link, "parentUuid", "u2".into()));
+    let changes = reader
+        .read(
+            &fixture.binding,
+            Window::Changes {
+                cursor: first.changes_cursor.unwrap(),
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(changes.removed_message_ids, ["u1"]);
+    let replayed = changes
+        .upserts
+        .iter()
+        .find(|message| message.id == "r1")
+        .unwrap();
+    assert_eq!(replayed.turn_id, "turn:u2");
+    assert_eq!(
+        replayed.message_revision,
+        first.messages[1].message_revision
+    );
+    assert!(!serde_json::to_string(&changes).unwrap().contains("HIDDEN_"));
+    assert!(reader.validate_jump_source(&original_prompt).is_err());
+
+    for missing in ["isSidechain", "sessionId"] {
+        let mut incomplete: serde_json::Value = serde_json::from_str(&link).unwrap();
+        incomplete.as_object_mut().unwrap().remove(missing);
+        let fixture = Fixture::new(
+            &(record("u1", None, "user", "question".into())
+                + &format!("{incomplete}\n")
+                + &record("r1", Some("bridge"), "assistant", "reply".into())
+                + &record("r2", Some("r1"), "assistant", "final".into())),
+        );
+        let page = reader
+            .read(&fixture.binding, Window::Latest, Limits::default())
+            .unwrap();
+        assert!(page.turns.is_empty());
+        assert_eq!(page.completeness, "source_available");
+    }
+    assert_eq!(
+        claude::normalize(
+            changed_record(&link, "sessionId", "foreign".into()).as_bytes(),
+            "synthetic-session"
+        )
+        .unwrap_err()
+        .code,
+        "session_changed"
+    );
+    assert_eq!(
+        claude::normalize(
+            changed_record(&link, "uuid", "bad\nuuid".into()).as_bytes(),
+            "synthetic-session"
+        )
+        .unwrap_err()
+        .code,
+        "unsupported_schema"
+    );
+}
+
+#[test]
+fn repeated_hidden_system_events_keep_visible_revision_but_invalidate_stale_jump() {
+    let fixture = Fixture::new(
+        &(record("u1", None, "user", "question".into())
+            + &record("r1", Some("u1"), "assistant", "reply".into())),
+    );
+    let mut reader = ConversationReader::default();
+    let first = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    let prompt = reader
+        .exact_human_prompt(&fixture.binding, "u1", &first.messages[0].message_revision)
+        .unwrap();
+    let event = system_event_record("stop", Some("r1"), "stop_hook_summary");
+    fixture.append(&(event.clone() + &event));
+    let changes = reader
+        .read(
+            &fixture.binding,
+            Window::Changes {
+                cursor: first.changes_cursor.unwrap(),
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert!(changes.upserts.is_empty());
+    assert!(changes.removed_message_ids.is_empty());
+    assert_eq!(changes.revision, first.revision);
+    assert!(reader.validate_jump_source(&prompt).is_err());
+}
+
+#[test]
+fn hidden_system_cycles_and_visible_id_collisions_remain_partial_without_payload_leaks() {
+    let root = record("u1", Some("stop"), "user", "question".into());
+    let stop = system_event_record("stop", Some("stop"), "stop_hook_summary");
+    let fixture =
+        Fixture::new(&(root + &stop + &record("r1", Some("u1"), "assistant", "reply".into())));
+    let page = ConversationReader::default()
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(page.completeness, "partial_unsupported_records");
+    assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+    let root = record("u1", None, "user", "question".into());
+    let colliding = system_event_record("u1", None, "turn_duration");
+    for text in [root.clone() + &colliding, colliding + &root] {
+        let fixture = Fixture::new(&text);
+        let page = ConversationReader::default()
+            .read(&fixture.binding, Window::Latest, Limits::default())
+            .unwrap();
+        assert_eq!(page.completeness, "partial_unsupported_records");
+        assert_eq!(page.messages[0].blocks[0].text.as_deref(), Some("question"));
+        assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+    }
+}
+
+#[test]
+fn nested_tool_references_render_only_inert_names_and_preserve_surrounding_text() {
+    let fixture = Fixture::new(&record(
+        "result",
+        None,
+        "user",
+        serde_json::json!([{"type":"tool_result", "tool_use_id":"generated-tool", "content":[
+            {"type":"text", "text":"before reference"},
+            {"type":"tool_reference", "tool_name":"inspect_repo", "text":"HIDDEN_REFERENCE_TEXT", "data":"HIDDEN_REFERENCE_DATA"},
+            {"type":"tool_reference", "extra":"HIDDEN_REFERENCE_EXTRA"},
+            {"type":"unknown_future_block", "text":"HIDDEN_UNKNOWN_PROSE"},
+            {"type":"text", "text":"after reference"}
+        ]}]),
+    ));
+    let page = ConversationReader::default()
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(page.messages[0].origin, "tool");
+    assert!(page.turns.is_empty());
+    assert_eq!(
+        page.messages[0].blocks[0].text.as_deref(),
+        Some("before reference\nTool reference: inspect_repo\nTool reference\nafter reference")
+    );
+    assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+}
+
 #[test]
 fn hidden_attachment_links_preserve_human_turn_search_around_and_jump() {
     let root = changed_record(
