@@ -2918,6 +2918,17 @@ impl HeadlessServer {
             return false;
         }
 
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::AgentConversationJump(_)
+                | api::schema::Method::AgentConversationRead(_)
+                | api::schema::Method::AgentConversationBlockRead(_)
+        ) {
+            self.app
+                .handle_deferred_history_request(msg.request, msg.respond_to);
+            return false;
+        }
+
         let frozen_alt_screen_read = match self.alt_screen_read_conflict(&msg.request) {
             AltScreenReadConflict::None => None,
             AltScreenReadConflict::Frozen(snapshot) => Some(snapshot),

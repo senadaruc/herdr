@@ -42,6 +42,18 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
+    AgentConversationJump {
+        #[serde(flatten)]
+        jump: crate::agent_history::model::ConversationJumpResult,
+    },
+    AgentConversation {
+        #[serde(flatten)]
+        page: crate::agent_history::model::ConversationPage,
+    },
+    AgentConversationBlock {
+        #[serde(flatten)]
+        page: crate::agent_history::model::BlockPage,
+    },
     Pong {
         version: String,
         protocol: u32,

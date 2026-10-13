@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+mod agent_history;
 mod agent_view;
 mod agents;
 mod env;
@@ -29,6 +30,17 @@ enum RuntimeExitAction {
 impl App {
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::AgentHistoryJumpFinished {
+                terminal_id,
+                binding,
+                request_id,
+                result,
+                respond_to,
+            } => self.finish_history_jump(&terminal_id, &binding, request_id, result, respond_to),
+            ev @ AppEvent::AgentHistoryReadFinished { .. } => {
+                self.handle_internal_event(ev);
+                false
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -90,6 +102,28 @@ impl App {
         &mut self,
         ev: AppEvent,
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
+        if let AppEvent::AgentHistoryJumpFinished {
+            terminal_id,
+            binding,
+            request_id,
+            result,
+            respond_to,
+        } = ev
+        {
+            self.finish_history_jump(&terminal_id, &binding, request_id, result, respond_to);
+            return Vec::new();
+        }
+        if let AppEvent::AgentHistoryReadFinished {
+            terminal_id,
+            binding,
+            request_id,
+            response,
+            respond_to,
+        } = ev
+        {
+            self.finish_history_read(&terminal_id, &binding, request_id, response, respond_to);
+            return Vec::new();
+        }
         let mut worktree_restore_failed = false;
         let ev = match ev {
             AppEvent::WorktreeRuntimeRestoreFailed {
@@ -1133,6 +1167,15 @@ impl App {
                     request.id,
                     "invalid_request",
                     "agent.wait is handled by the api server",
+                );
+            }
+            Method::AgentConversationJump(_)
+            | Method::AgentConversationRead(_)
+            | Method::AgentConversationBlockRead(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "background_dispatch_required",
+                    "conversation reads require the deferred worker path",
                 );
             }
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),

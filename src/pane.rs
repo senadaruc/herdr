@@ -2230,6 +2230,69 @@ fn publish_reported_cwd(
     }
 }
 
+/// Cloneable read access for bounded background conversation scans. It has no PTY writer.
+#[derive(Clone)]
+pub(crate) struct ConversationTerminalHandle {
+    terminal: Arc<PaneTerminal>,
+    content_seq: Arc<AtomicU64>,
+    content_write_lock: Arc<Mutex<()>>,
+}
+pub(crate) struct ConversationTerminalJumpAnchor {
+    owner: Arc<PaneTerminal>,
+    pub content_seq: u64,
+    pub source_row: usize,
+    cols: u16,
+    rows: u16,
+    total_rows: usize,
+}
+impl std::fmt::Debug for ConversationTerminalJumpAnchor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConversationTerminalJumpAnchor")
+            .field("content_seq", &self.content_seq)
+            .field("source_row", &self.source_row)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .finish()
+    }
+}
+impl ConversationTerminalHandle {
+    pub(crate) fn resolve_prompt(
+        &self,
+        prompt: &str,
+        assistant_line: &str,
+    ) -> Result<ConversationTerminalJumpAnchor, crate::agent_history::HistoryError> {
+        let guard = self.content_write_lock.lock().map_err(|_| {
+            crate::agent_history::HistoryError::new(
+                "content_changed",
+                "terminal content lock is unavailable",
+            )
+        })?;
+        let content_seq = self.content_seq.load(Ordering::Acquire);
+        if !content_seq.is_multiple_of(2) {
+            return Err(crate::agent_history::HistoryError::new(
+                "content_changed",
+                "terminal output is changing",
+            ));
+        }
+        let mut snapshot = self.terminal.conversation_prompt_rows()?;
+        drop(guard);
+        let source_row = snapshot.locate(prompt, assistant_line)?;
+        if self.content_seq.load(Ordering::Acquire) != content_seq {
+            return Err(crate::agent_history::HistoryError::new(
+                "content_changed",
+                "terminal output changed during prompt matching",
+            ));
+        }
+        Ok(ConversationTerminalJumpAnchor {
+            owner: self.terminal.clone(),
+            content_seq,
+            source_row,
+            cols: snapshot.cols,
+            rows: snapshot.viewport_rows,
+            total_rows: snapshot.total_rows,
+        })
+    }
+}
 impl PaneRuntime {
     pub fn shutdown(mut self) {
         if let Some(handle) = self.detect_handle.take() {
@@ -3333,6 +3396,48 @@ impl PaneRuntime {
         (rows, cols)
     }
 
+    pub(crate) fn conversation_terminal_handle(&self) -> ConversationTerminalHandle {
+        ConversationTerminalHandle {
+            terminal: self.terminal.clone(),
+            content_seq: self.content_seq.clone(),
+            content_write_lock: self.content_write_lock.clone(),
+        }
+    }
+    pub(crate) fn commit_conversation_jump(
+        &self,
+        anchor: &ConversationTerminalJumpAnchor,
+        validate: impl FnOnce() -> Result<(), crate::agent_history::HistoryError>,
+    ) -> Result<usize, crate::agent_history::HistoryError> {
+        use crate::agent_history::HistoryError;
+        let guard = self.content_write_lock.try_lock().map_err(|_| {
+            HistoryError::new(
+                "content_changed",
+                "terminal output is changing; retry the jump",
+            )
+        })?;
+        validate()?;
+        if !Arc::ptr_eq(&self.terminal, &anchor.owner) {
+            return Err(HistoryError::new(
+                "terminal_changed",
+                "terminal instance was replaced before the jump",
+            ));
+        }
+        if self.content_seq() != anchor.content_seq || !anchor.content_seq.is_multiple_of(2) {
+            return Err(HistoryError::new(
+                "content_changed",
+                "terminal output or size changed before the jump",
+            ));
+        }
+        let offset = self.terminal.commit_conversation_prompt_row(
+            anchor.cols,
+            anchor.rows,
+            anchor.total_rows,
+            anchor.source_row,
+        )?;
+        drop(guard);
+        self.compression.wake();
+        Ok(offset)
+    }
     pub(crate) fn content_seq(&self) -> u64 {
         self.content_seq.load(Ordering::Acquire)
     }
@@ -4280,6 +4385,302 @@ mod tests {
         assert!(runtime.visible_text().contains("five"));
     }
 
+    #[tokio::test]
+    async fn conversation_jump_matches_unique_unicode_multiline_and_softwrapped_prompts_without_input(
+    ) {
+        let (runtime,mut input)=PaneRuntime::test_with_channel_and_scrollback_bytes(18,4,1024*1024,"❯ Unicode 界é long prompt\r\n  second line 🌍\r\n⏺ reply\r\nmore\r\nmore\r\nmore\r\nlatest\r\n".as_bytes(),8);
+        let before = runtime.content_seq();
+        let dimensions = runtime.current_size();
+        let anchor = runtime
+            .conversation_terminal_handle()
+            .resolve_prompt("Unicode 界é long prompt\nsecond line 🌍", "reply")
+            .unwrap();
+        assert_eq!(anchor.source_row, 0);
+        let offset = runtime
+            .commit_conversation_jump(&anchor, || Ok(()))
+            .unwrap();
+        assert!(offset > 0);
+        assert_eq!(runtime.scroll_metrics().unwrap().offset_from_bottom, offset);
+        assert_eq!(runtime.content_seq(), before);
+        assert_eq!(runtime.current_size(), dimensions);
+        assert!(input.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn conversation_jump_refuses_duplicates_partial_prompts_and_stale_terminal_state() {
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            40,
+            4,
+            1024 * 1024,
+            "❯ repeat\r\n⏺ answer\r\n❯ repeat\r\n⏺ answer\r\n".as_bytes(),
+        );
+        let before = runtime.scroll_metrics();
+        assert_eq!(
+            runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("repeat", "answer")
+                .err()
+                .unwrap()
+                .code,
+            "jump_ambiguous"
+        );
+        assert_eq!(runtime.scroll_metrics(), before);
+        assert_eq!(
+            runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("repeat plus missing text", "answer")
+                .err()
+                .unwrap()
+                .code,
+            "jump_not_found"
+        );
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            40,
+            4,
+            1024 * 1024,
+            "❯ unique\r\n⏺ answer\r\nmore\r\nmore\r\nmore\r\n".as_bytes(),
+        );
+        let anchor = runtime
+            .conversation_terminal_handle()
+            .resolve_prompt("unique", "answer")
+            .unwrap();
+        let before = runtime.scroll_metrics();
+        runtime.test_process_pty_bytes(b"new output");
+        assert_eq!(
+            runtime
+                .commit_conversation_jump(&anchor, || Ok(()))
+                .unwrap_err()
+                .code,
+            "content_changed"
+        );
+        assert_eq!(runtime.scroll_metrics(), before);
+        let anchor = runtime
+            .conversation_terminal_handle()
+            .resolve_prompt("unique", "answer")
+            .unwrap();
+        runtime.resize(5, 30, 0, 0);
+        let before = runtime.scroll_metrics();
+        assert_eq!(
+            runtime
+                .commit_conversation_jump(&anchor, || Ok(()))
+                .unwrap_err()
+                .code,
+            "content_changed"
+        );
+        assert_eq!(runtime.scroll_metrics(), before);
+        let other = PaneRuntime::test_with_scrollback_bytes(
+            40,
+            4,
+            1024 * 1024,
+            "❯ unique\r\n⏺ answer\r\nmore\r\n".as_bytes(),
+        );
+        let before = other.scroll_metrics();
+        assert_eq!(
+            other
+                .commit_conversation_jump(&anchor, || Ok(()))
+                .unwrap_err()
+                .code,
+            "terminal_changed"
+        );
+        assert_eq!(other.scroll_metrics(), before);
+        runtime.test_process_pty_bytes(b"\x1b[?1049h");
+        assert_eq!(
+            runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("unique", "answer")
+                .err()
+                .unwrap()
+                .code,
+            "alternate_screen"
+        );
+    }
+    #[tokio::test]
+    async fn conversation_jump_refuses_shorter_prompt_prefix_of_retained_longer_prompt() {
+        for (saved, rendered) in [
+            ("foo", "❯ foo\r\n  bar\r\n⏺ answer\r\n"),
+            ("foo\nbar", "❯ foo\r\n  bar\r\n  baz\r\n⏺ answer\r\n"),
+            ("foo", "❯ foo\r\n  \r\n  bar\r\n⏺ answer\r\n"),
+        ] {
+            let runtime =
+                PaneRuntime::test_with_scrollback_bytes(40, 4, 1024 * 1024, rendered.as_bytes());
+            let before = runtime.scroll_metrics();
+            assert_eq!(
+                runtime
+                    .conversation_terminal_handle()
+                    .resolve_prompt(saved, "answer")
+                    .err()
+                    .unwrap()
+                    .code,
+                "jump_not_found"
+            );
+            assert_eq!(runtime.scroll_metrics(), before);
+        }
+    }
+    #[tokio::test]
+    async fn conversation_jump_refuses_quoted_prompt_without_exact_assistant_context() {
+        for rendered in [
+            "⏺ Quote from tool output:\r\n❯ foo\r\nordinary quoted continuation\r\nlatest\r\n",
+            "❯ foo\r\n⏺ unrelated reply\r\nlatest\r\n",
+        ] {
+            let runtime =
+                PaneRuntime::test_with_scrollback_bytes(40, 4, 1024 * 1024, rendered.as_bytes());
+            let before = runtime.scroll_metrics();
+            assert!(runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("foo", "answer")
+                .is_err());
+            assert_eq!(runtime.scroll_metrics(), before);
+        }
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            18,
+            4,
+            1024 * 1024,
+            "❯ foo\r\n● Exact Unicode 界é response matching soft wrap\r\nlatest\r\n".as_bytes(),
+        );
+        assert!(runtime
+            .conversation_terminal_handle()
+            .resolve_prompt("foo", "Exact Unicode 界é response matching soft wrap")
+            .is_ok());
+    }
+    #[tokio::test]
+    async fn conversation_jump_accepts_bounded_blank_exchange_separators_but_not_longer_prompt_continuation(
+    ) {
+        for blank_count in [1, 2, 8] {
+            let rendered = format!(
+                "❯ foo\r\n{}⏺ answer\r\nmore\r\nmore\r\nlatest\r\n",
+                "\r\n".repeat(blank_count)
+            );
+            let runtime =
+                PaneRuntime::test_with_scrollback_bytes(40, 4, 1024 * 1024, rendered.as_bytes());
+            let anchor = runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("foo", "answer")
+                .unwrap();
+            assert_eq!(anchor.source_row, 0);
+            assert!(
+                runtime
+                    .commit_conversation_jump(&anchor, || Ok(()))
+                    .unwrap()
+                    > 0
+            );
+            assert!(runtime.visible_text().contains("❯ foo"));
+        }
+        for following in [
+            "\r\n  bar\r\n⏺ answer",
+            "\r\n⏺ wrong context",
+            "\r\nquoted text\r\n⏺ answer",
+            "\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n⏺ answer",
+        ] {
+            let runtime = PaneRuntime::test_with_scrollback_bytes(
+                40,
+                4,
+                1024 * 1024,
+                format!("❯ foo\r\n{following}\r\nlatest\r\n").as_bytes(),
+            );
+            let before = runtime.scroll_metrics();
+            assert!(runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("foo", "answer")
+                .is_err());
+            assert_eq!(runtime.scroll_metrics(), before);
+        }
+    }
+    #[tokio::test]
+    async fn conversation_jump_final_binding_check_excludes_writers_and_refusal_preserves_viewport()
+    {
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            40,
+            4,
+            1024 * 1024,
+            "❯ exact\r\n⏺ answer\r\nmore\r\nmore\r\nmore\r\n".as_bytes(),
+        );
+        let anchor = runtime
+            .conversation_terminal_handle()
+            .resolve_prompt("exact", "answer")
+            .unwrap();
+        let before = runtime.scroll_metrics();
+        let err = runtime
+            .commit_conversation_jump(&anchor, || {
+                assert!(runtime.content_write_lock.try_lock().is_err());
+                Err(crate::agent_history::HistoryError::new(
+                    "source_changed",
+                    "synthetic stale source",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(err.code, "source_changed");
+        assert_eq!(runtime.scroll_metrics(), before);
+        let held = runtime.content_write_lock.lock().unwrap();
+        assert_eq!(
+            runtime
+                .commit_conversation_jump(&anchor, || Ok(()))
+                .unwrap_err()
+                .code,
+            "content_changed"
+        );
+        assert_eq!(runtime.scroll_metrics(), before);
+        drop(held);
+        assert!(
+            runtime
+                .commit_conversation_jump(&anchor, || {
+                    assert!(runtime.content_write_lock.try_lock().is_err());
+                    Ok(())
+                })
+                .unwrap()
+                > 0
+        );
+    }
+    #[tokio::test]
+    async fn conversation_jump_refuses_aged_out_unmarked_collapsed_and_over_limit_rows() {
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            40,
+            4,
+            0,
+            "❯ aged prompt\r\nmore\r\nmore\r\nmore\r\nmore\r\nmore\r\n".as_bytes(),
+        );
+        assert_eq!(
+            runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("aged prompt", "answer")
+                .err()
+                .unwrap()
+                .code,
+            "jump_not_found"
+        );
+        let runtime = PaneRuntime::test_with_screen_bytes(40, 4, b"unmarked prompt\r\n");
+        assert_eq!(
+            runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("unmarked prompt", "answer")
+                .err()
+                .unwrap()
+                .code,
+            "jump_not_found"
+        );
+        let runtime = PaneRuntime::test_with_screen_bytes(
+            40,
+            4,
+            "❯ [Pasted text #1 +20 lines]\r\n".as_bytes(),
+        );
+        assert_eq!(
+            runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("full pasted message", "answer")
+                .err()
+                .unwrap()
+                .code,
+            "jump_not_found"
+        );
+        let runtime = PaneRuntime::test_with_screen_bytes(4096, 256, b"");
+        assert_eq!(
+            runtime
+                .conversation_terminal_handle()
+                .resolve_prompt("anything", "answer")
+                .err()
+                .unwrap()
+                .code,
+            "scan_limit"
+        );
+    }
     #[tokio::test]
     async fn dirty_patch_snapshot_keeps_clean_metadata_and_terminal_fallback() {
         let (runtime, _rx) = PaneRuntime::test_with_channel(20, 4);

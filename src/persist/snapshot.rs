@@ -110,6 +110,8 @@ pub struct PaneSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_binding: Option<crate::agent_history::binding::HistoryBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
 }
 
@@ -387,6 +389,7 @@ fn capture_tab(
                 managed_agent_kind,
                 agent_session,
                 agent_resume,
+                history_binding: terminal.and_then(|t| t.active_history_binding()).cloned(),
                 launch_argv,
             },
         );
@@ -706,6 +709,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                history_binding: None,
                 launch_argv: None,
             },
         );
@@ -718,6 +722,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                history_binding: None,
                 launch_argv: None,
             },
         );
@@ -1404,6 +1409,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                history_binding: None,
                 launch_argv: None,
             },
         );
@@ -1418,6 +1424,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                history_binding: None,
                 launch_argv: None,
             },
         );

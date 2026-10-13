@@ -81,6 +81,9 @@ operations::define_operations! {
     AgentList(EmptyParams) => "agent.list", false, false;
     AgentGet(AgentTarget) => "agent.get", false, false;
     AgentRead(AgentReadParams) => "agent.read", false, false;
+    AgentConversationRead(crate::agent_history::model::ConversationReadParams) => "agent.conversation.read", false, true;
+    AgentConversationBlockRead(crate::agent_history::model::ConversationBlockReadParams) => "agent.conversation.block.read", false, true;
+    AgentConversationJump(crate::agent_history::model::ConversationJumpParams) => "agent.conversation.jump", true, true;
     AgentExplain(AgentTarget) => "agent.explain", false, false;
     AgentSendKeys(AgentSendKeysParams) => "agent.send_keys", true, false;
     AgentRename(AgentRenameParams) => "agent.rename", true, false;

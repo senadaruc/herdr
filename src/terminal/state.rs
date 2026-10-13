@@ -139,6 +139,7 @@ pub struct TerminalState {
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
     reported_resume_revision: u64,
+    pub history_binding: Option<crate::agent_history::binding::HistoryBinding>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
@@ -179,6 +180,7 @@ impl TerminalState {
             persisted_agent_session: None,
             reported_resume: None,
             reported_resume_revision: 0,
+            history_binding: None,
             terminal_title: None,
             manual_label: None,
             agent_name: None,
@@ -1440,6 +1442,45 @@ impl TerminalState {
     ) -> bool {
         (source, agent_label, session_start_source, seq)
             == ("herdr:opencode", "opencode", Some("select"), None)
+    }
+
+    pub fn active_history_binding(&self) -> Option<&crate::agent_history::binding::HistoryBinding> {
+        let binding = self.history_binding.as_ref()?;
+        let session = self.persisted_agent_session.as_ref()?;
+        (session.source == "herdr:claude"
+            && session.agent == "claude"
+            && session.session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+            && session.session_ref.value == binding.session_id)
+            .then_some(binding)
+    }
+
+    /// Return whether the persisted source changed, retaining its generation on repeat reports.
+    pub fn set_history_binding(
+        &mut self,
+        binding: crate::agent_history::binding::HistoryBinding,
+    ) -> bool {
+        if binding.provider != "claude"
+            || !self
+                .persisted_agent_session
+                .as_ref()
+                .is_some_and(|session| {
+                    session.source == "herdr:claude"
+                        && session.agent == "claude"
+                        && session.session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+                        && session.session_ref.value == binding.session_id
+                })
+        {
+            return false;
+        }
+        if self.history_binding.as_ref().is_some_and(|old| {
+            old.provider == binding.provider
+                && old.session_id == binding.session_id
+                && old.transcript_path == binding.transcript_path
+        }) {
+            return false;
+        }
+        self.history_binding = Some(binding);
+        true
     }
 
     pub fn set_persisted_agent_session(
@@ -5760,6 +5801,48 @@ mod tests {
             .expect("same session should be accepted");
 
         assert!(!mutation.session_ref_changed);
+    }
+
+    #[test]
+    fn history_binding_changes_only_for_the_current_claude_source() {
+        let mut terminal = test_terminal();
+        let binding = crate::agent_history::binding::HistoryBinding::from_report(
+            "herdr:claude",
+            "claude",
+            Some("claude-session"),
+            Some("/tmp/claude-session.jsonl"),
+        )
+        .unwrap();
+        assert!(!terminal.set_history_binding(binding.clone()));
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+        });
+        assert!(terminal.set_history_binding(binding.clone()));
+
+        let mut repeated = binding.clone();
+        repeated.generation = "new-report-generation".into();
+        assert!(!terminal.set_history_binding(repeated.clone()));
+        assert_eq!(terminal.active_history_binding(), Some(&binding));
+
+        repeated.transcript_path = "/tmp/relocated-claude-session.jsonl".into();
+        assert!(terminal.set_history_binding(repeated.clone()));
+        assert_eq!(terminal.active_history_binding(), Some(&repeated));
+
+        let mut invalid = repeated.clone();
+        invalid.provider = "codex".into();
+        assert!(!terminal.set_history_binding(invalid));
+        let mut invalid = repeated.clone();
+        invalid.session_id = "other-session".into();
+        assert!(!terminal.set_history_binding(invalid));
+        terminal.persisted_agent_session.as_mut().unwrap().source = "custom:claude".into();
+        assert!(!terminal.set_history_binding(binding.clone()));
+        let session = terminal.persisted_agent_session.as_mut().unwrap();
+        session.source = "herdr:claude".into();
+        session.session_ref.kind = crate::agent_resume::AgentSessionRefKind::Path;
+        assert!(!terminal.set_history_binding(binding));
+        assert_eq!(terminal.history_binding.as_ref(), Some(&repeated));
     }
 
     #[test]

@@ -1,0 +1,6 @@
+{"type":"user","uuid":"human-1","sessionId":"synthetic-session","parentUuid":null,"isSidechain":false,"message":{"role":"user","content":"Explain the failing test 🌍"}}
+{"type":"assistant","uuid":"assistant-1","sessionId":"synthetic-session","parentUuid":"human-1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"INTERNAL_THINKING"},{"type":"text","text":"Here is the reply."},{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"synthetic.rs"}}]}}
+{"type":"user","uuid":"tool-result","sessionId":"synthetic-session","parentUuid":"assistant-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"fabricated output"}]}}
+{"type":"user","uuid":"automatic","sessionId":"synthetic-session","parentUuid":"tool-result","isMeta":true,"message":{"role":"user","content":"Automatic context notice"}}
+{"type":"assistant","uuid":"image","sessionId":"synthetic-session","parentUuid":"automatic","message":{"role":"assistant","content":[{"type":"image","source":{"type":"base64","data":"SECRET_BASE64"}}]}}
+{"type":"user","uuid":"subagent","sessionId":"synthetic-session","isSidechain":true,"message":{"role":"user","content":"Subagent input"}}

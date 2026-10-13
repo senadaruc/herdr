@@ -42,6 +42,12 @@ pub struct ServerSshAgentRegisterParams {
 pub struct ServerCapabilities {
     pub live_handoff: bool,
     #[serde(default)]
+    pub agent_conversation_read: bool,
+    #[serde(default)]
+    pub agent_conversation_jump: bool,
+    #[serde(default)]
+    pub agent_conversation_block_read: bool,
+    #[serde(default)]
     pub detached_server_daemon: bool,
     /// Stable client-owned endpoint generation supported by this server.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -558,6 +558,27 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
     }
 }
 
+/// Open validated source data without blocking on a substituted FIFO or following a raced symlink.
+pub(crate) fn open_regular_file_readonly(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+pub(crate) fn regular_file_identity(file: &std::fs::File) -> std::io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

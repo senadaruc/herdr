@@ -1613,6 +1613,12 @@ impl App {
         let report_is_newer = self
             .pane_terminal(ws_idx, pane_id)
             .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        let history_binding = crate::agent_history::binding::HistoryBinding::from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id.as_deref(),
+            params.agent_session_path.as_deref(),
+        );
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1621,6 +1627,7 @@ impl App {
         );
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
+            history_binding,
             session_ref: session_ref.clone(),
             source: params.source.clone(),
             agent_label: agent_label.clone(),

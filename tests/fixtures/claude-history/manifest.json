@@ -1,0 +1,1 @@
+{"synthetic":true,"adapters":["claude-jsonl-string-v1","claude-jsonl-blocks-v1"],"fixtures":{"visible.jsonl":"Fabricated string/block, tools, automatic notices, reasoning omission and sidechain exclusion"}}

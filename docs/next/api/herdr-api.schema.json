@@ -1759,6 +1759,92 @@
           ],
           "type": "object"
         },
+        "ConversationBlockReadParams": {
+          "additionalProperties": false,
+          "properties": {
+            "block_cursor": {
+              "type": "string"
+            },
+            "expected_session_id": {
+              "type": "string"
+            },
+            "max_bytes": {
+              "default": 1048576,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "expected_session_id",
+            "block_cursor"
+          ],
+          "type": "object"
+        },
+        "ConversationJumpParams": {
+          "additionalProperties": false,
+          "properties": {
+            "expected_generation": {
+              "type": "string"
+            },
+            "expected_session_id": {
+              "type": "string"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "message_revision": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "expected_session_id",
+            "expected_generation",
+            "message_id",
+            "message_revision"
+          ],
+          "type": "object"
+        },
+        "ConversationReadParams": {
+          "additionalProperties": false,
+          "properties": {
+            "expected_session_id": {
+              "type": "string"
+            },
+            "limit": {
+              "default": 100,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_bytes": {
+              "default": 1048576,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target": {
+              "type": "string"
+            },
+            "window": {
+              "$ref": "#/schemas/request/$defs/Window"
+            }
+          },
+          "required": [
+            "target",
+            "expected_session_id",
+            "window"
+          ],
+          "type": "object"
+        },
         "EmptyParams": {
           "type": "object"
         },
@@ -4366,6 +4452,135 @@
           ],
           "type": "string"
         },
+        "Window": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "latest",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "before",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "cursor"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "after",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "cursor"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "around",
+                  "type": "string"
+                },
+                "message_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "search",
+                  "type": "string"
+                },
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "query"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "turns",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "changes",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "cursor"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -5281,6 +5496,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.conversation.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ConversationReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.conversation.block.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ConversationBlockReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.conversation.jump",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ConversationJumpParams"
             }
           },
           "required": [
@@ -6791,6 +7054,155 @@
             "failed"
           ],
           "type": "string"
+        },
+        "ContentBlock": {
+          "properties": {
+            "block_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        "ConversationBinding": {
+          "properties": {
+            "generation": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "session_id",
+            "generation"
+          ],
+          "type": "object"
+        },
+        "ConversationMessage": {
+          "properties": {
+            "blocks": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ContentBlock"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "message_revision": {
+              "type": "string"
+            },
+            "order": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "origin": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "turn_id",
+            "role",
+            "origin",
+            "status",
+            "message_revision",
+            "order",
+            "blocks"
+          ],
+          "type": "object"
+        },
+        "ConversationTurn": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "ordinal": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "preview": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "message_id",
+            "ordinal",
+            "preview"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -9169,6 +9581,199 @@
           "oneOf": [
             {
               "properties": {
+                "binding": {
+                  "$ref": "#/schemas/success_response/$defs/ConversationBinding"
+                },
+                "content_seq": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "message_id": {
+                  "type": "string"
+                },
+                "message_revision": {
+                  "type": "string"
+                },
+                "offset_from_bottom": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "source_row": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "agent_conversation_jump",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "binding",
+                "message_id",
+                "message_revision",
+                "content_seq",
+                "source_row",
+                "offset_from_bottom"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "after_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "availability": {
+                  "type": "string"
+                },
+                "before_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "binding": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/ConversationBinding"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "changes_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "completeness": {
+                  "type": "string"
+                },
+                "match_message_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "messages": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ConversationMessage"
+                  },
+                  "type": "array"
+                },
+                "removed_message_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "revision": {
+                  "type": "string"
+                },
+                "search_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "turns": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ConversationTurn"
+                  },
+                  "type": "array"
+                },
+                "turns_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "agent_conversation",
+                  "type": "string"
+                },
+                "upserts": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ConversationMessage"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "revision",
+                "availability",
+                "completeness",
+                "messages",
+                "turns",
+                "upserts",
+                "removed_message_ids",
+                "match_message_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "binding": {
+                  "$ref": "#/schemas/success_response/$defs/ConversationBinding"
+                },
+                "block_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "message_id": {
+                  "type": "string"
+                },
+                "message_revision": {
+                  "type": "string"
+                },
+                "next_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "revision": {
+                  "type": "string"
+                },
+                "slice_index": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_conversation_block",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "binding",
+                "revision",
+                "message_id",
+                "message_revision",
+                "block_id",
+                "kind",
+                "text",
+                "slice_index"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "capabilities": {
                   "anyOf": [
                     {
@@ -10420,6 +11025,18 @@
         },
         "ServerCapabilities": {
           "properties": {
+            "agent_conversation_block_read": {
+              "default": false,
+              "type": "boolean"
+            },
+            "agent_conversation_jump": {
+              "default": false,
+              "type": "boolean"
+            },
+            "agent_conversation_read": {
+              "default": false,
+              "type": "boolean"
+            },
             "detached_server_daemon": {
               "default": false,
               "type": "boolean"

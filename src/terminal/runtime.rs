@@ -598,6 +598,16 @@ impl TerminalRuntime {
         self.0.current_size()
     }
 
+    pub(crate) fn conversation_terminal_handle(&self) -> crate::pane::ConversationTerminalHandle {
+        self.0.conversation_terminal_handle()
+    }
+    pub(crate) fn commit_conversation_jump(
+        &self,
+        anchor: &crate::pane::ConversationTerminalJumpAnchor,
+        validate: impl FnOnce() -> Result<(), crate::agent_history::HistoryError>,
+    ) -> Result<usize, crate::agent_history::HistoryError> {
+        self.0.commit_conversation_jump(anchor, validate)
+    }
     pub(crate) fn content_seq(&self) -> u64 {
         self.0.content_seq()
     }

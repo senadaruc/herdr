@@ -721,6 +721,9 @@ fn success_response_round_trips() {
             version: "0.1.2".into(),
             protocol: 6,
             capabilities: Some(ServerCapabilities {
+                agent_conversation_read: false,
+                agent_conversation_jump: false,
+                agent_conversation_block_read: false,
                 live_handoff: true,
                 detached_server_daemon: true,
                 endpoint_protocol_generation: Some(1),
@@ -1464,4 +1467,33 @@ fn pane_link_resolve_round_trips() {
 fn read_choices_cover_every_api_value() {
     crate::cli::projection::assert_choices_cover_api_enum(READ_SOURCES);
     crate::cli::projection::assert_choices_cover_api_enum(READ_FORMATS);
+}
+
+#[test]
+fn conversation_history_requests_are_read_only_and_reject_arbitrary_paths() {
+    for method in ["agent.conversation.read", "agent.conversation.block.read"] {
+        let params = if method.ends_with("block.read") {
+            serde_json::json!({"target":"w1:p1","expected_session_id":"s","block_cursor":"c"})
+        } else {
+            serde_json::json!({"target":"w1:p1","expected_session_id":"s","window":{"kind":"latest"}})
+        };
+        let request: Request = serde_json::from_value(
+            serde_json::json!({"id":"history","method":method,"params":params}),
+        )
+        .unwrap();
+        assert!(!crate::api::request_changes_ui(&request));
+        let mut invalid = serde_json::to_value(request).unwrap();
+        invalid["params"]["transcript_path"] = "/arbitrary/file".into();
+        assert!(serde_json::from_value::<Request>(invalid).is_err());
+    }
+}
+
+#[test]
+fn conversation_jump_request_is_a_distinct_viewport_action_with_no_path_parameter() {
+    let value = serde_json::json!({"id":"synthetic-jump","method":"agent.conversation.jump","params":{"target":"w1:p1","expected_session_id":"synthetic-session","expected_generation":"generation-1","message_id":"human-1","message_revision":"revision-1"}});
+    let request: Request = serde_json::from_value(value).unwrap();
+    assert!(crate::api::request_changes_ui(&request));
+    let mut invalid = serde_json::to_value(request).unwrap();
+    invalid["params"]["transcript_path"] = "/arbitrary/path".into();
+    assert!(serde_json::from_value::<Request>(invalid).is_err());
 }

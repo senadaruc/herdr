@@ -1540,6 +1540,8 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::AgentHistoryJumpFinished { .. } => Vec::new(),
+            AppEvent::AgentHistoryReadFinished { .. } => Vec::new(),
             AppEvent::AgentSessionReported {
                 pane_id,
                 source,
@@ -1547,18 +1549,29 @@ impl AppState {
                 seq,
                 session_ref,
                 session_start_source,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref_for_session_start(
+                history_binding,
+            } => {
+                let mut history_binding_changed = false;
+                let update = self.update_terminal_state(pane_id, |terminal| {
+                    let mutation = terminal.set_agent_session_ref_for_session_start(
                         source,
                         agent_label,
                         session_ref,
                         seq,
                         session_start_source,
-                    )
-                })
-                .into_iter()
-                .collect(),
+                    );
+                    if mutation.is_some() {
+                        if let Some(binding) = history_binding {
+                            history_binding_changed = terminal.set_history_binding(binding);
+                        }
+                    }
+                    mutation
+                });
+                if history_binding_changed {
+                    self.mark_session_dirty();
+                }
+                update.into_iter().collect()
+            }
             AppEvent::HookMetadataReported {
                 pane_id,
                 source,
@@ -3309,6 +3322,7 @@ mod tests {
         for (seq, session, reason) in [(1, "old-session", "startup"), (2, "new-session", "clear")] {
             let updates = app.handle_app_event(AppEvent::AgentSessionReported {
                 pane_id,
+                history_binding: None,
                 source: "herdr:claude".into(),
                 agent_label: "claude".into(),
                 seq: Some(seq),
@@ -3688,6 +3702,7 @@ mod tests {
         for (session, seq) in [("first", 1), ("second", 4)] {
             state.handle_app_event(AppEvent::AgentSessionReported {
                 pane_id,
+                history_binding: None,
                 source: "herdr:codex".into(),
                 agent_label: "codex".into(),
                 seq: Some(seq),
@@ -4158,6 +4173,146 @@ mod tests {
 
         assert!(second_updates.is_empty());
         assert!(state.session_dirty);
+    }
+
+    #[test]
+    fn late_claude_history_binding_is_saved_without_resetting_agent_attention() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.toast_config.delay_seconds = 5;
+        let pane_id = state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = state.workspaces[1].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
+            session_start_source: None,
+            history_binding: None,
+        });
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_agent_name("reviewer".into());
+        for agent_state in [AgentState::Working, AgentState::Idle] {
+            state.handle_app_event(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Claude),
+                state: agent_state,
+                visible_blocker: false,
+                visible_working: agent_state == AgentState::Working,
+                process_exited: false,
+                observed_at: Instant::now(),
+            });
+        }
+        let completion = state.terminals[&terminal_id].last_agent_completion_seq;
+        assert!(completion.is_some());
+        assert!(!state.workspaces[1].panes[&pane_id].seen);
+        let notification_deadline = state.pending_agent_notifications[&pane_id].deadline;
+        let binding = crate::agent_history::binding::HistoryBinding::from_report(
+            "herdr:claude",
+            "claude",
+            Some("claude-session"),
+            Some("/tmp/claude-session.jsonl"),
+        )
+        .unwrap();
+
+        for (seq, expect_dirty) in [(21, true), (22, false)] {
+            state.session_dirty = false;
+            let mut reported_binding = binding.clone();
+            if seq == 22 {
+                reported_binding.generation = "new-report-generation".into();
+            }
+            let updates = state.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
+                session_start_source: None,
+                history_binding: Some(reported_binding),
+            });
+            assert!(updates.is_empty());
+            assert_eq!(state.session_dirty, expect_dirty);
+            let terminal = &state.terminals[&terminal_id];
+            assert_eq!(terminal.active_history_binding(), Some(&binding));
+            assert_eq!(terminal.state, AgentState::Idle);
+            assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
+            assert_eq!(terminal.last_agent_completion_seq, completion);
+            assert!(!state.workspaces[1].panes[&pane_id].seen);
+            assert_eq!(
+                state.pending_agent_notifications[&pane_id].deadline,
+                notification_deadline
+            );
+        }
+        let snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            state.active,
+            state.selected,
+        );
+        assert_eq!(
+            snapshot.workspaces[1].tabs[0].panes[&pane_id.raw()]
+                .history_binding
+                .as_ref(),
+            Some(&binding),
+        );
+    }
+
+    #[test]
+    fn rejected_claude_history_binding_reports_do_not_dirty_or_replace_saved_source() {
+        let mut state = app_with_workspaces(&["active"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        let binding = crate::agent_history::binding::HistoryBinding::from_report(
+            "herdr:claude",
+            "claude",
+            Some("claude-session"),
+            Some("/tmp/claude-session.jsonl"),
+        )
+        .unwrap();
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
+            session_start_source: None,
+            history_binding: Some(binding.clone()),
+        });
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        for (source, agent, session, seq) in [
+            ("herdr:claude", "claude", "claude-session", 19),
+            ("herdr:claude", "claude", "other-session", 21),
+            ("herdr:pi", "pi", "claude-session", 22),
+        ] {
+            state.session_dirty = false;
+            let mut reported_binding = binding.clone();
+            reported_binding.session_id = session.into();
+            reported_binding.transcript_path = "/tmp/rejected-session.jsonl".into();
+            let updates = state.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: source.into(),
+                agent_label: agent.into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session),
+                session_start_source: None,
+                history_binding: Some(reported_binding),
+            });
+            assert!(updates.is_empty());
+            assert!(!state.session_dirty);
+            let terminal = &state.terminals[&terminal_id];
+            assert_eq!(terminal.active_history_binding(), Some(&binding));
+            assert_eq!(terminal.state, AgentState::Working);
+            assert_eq!(terminal.detected_agent, Some(Agent::Claude));
+        }
     }
 
     #[test]
