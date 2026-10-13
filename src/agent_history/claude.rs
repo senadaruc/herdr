@@ -11,6 +11,21 @@ fn optional_string(v: &Value, key: &str) -> Option<String> {
 }
 
 pub fn normalize(line: &[u8], session: &str) -> Result<Option<ConversationMessage>, HistoryError> {
+    Ok(parse_record(line, session)?.message)
+}
+
+#[derive(Default)]
+pub(crate) struct ParsedRecord {
+    pub message: Option<ConversationMessage>,
+    pub parent_link: Option<ParentLink>,
+}
+
+pub(crate) struct ParentLink {
+    pub id: String,
+    pub parent: Option<String>,
+}
+
+pub(crate) fn parse_record(line: &[u8], session: &str) -> Result<ParsedRecord, HistoryError> {
     let record: Value = serde_json::from_slice(line).map_err(|_| {
         HistoryError::new(
             "unsupported_schema",
@@ -20,8 +35,57 @@ pub fn normalize(line: &[u8], session: &str) -> Result<Option<ConversationMessag
     if record.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || record.get("agentId").is_some()
     {
-        return Ok(None);
+        return Ok(ParsedRecord::default());
     }
+    if record.get("type").and_then(Value::as_str) == Some("attachment") {
+        if record.get("sessionId").and_then(Value::as_str) != Some(session) {
+            return Err(HistoryError::new(
+                "session_changed",
+                "transcript does not confirm the exact reported session",
+            ));
+        }
+        if record.get("isSidechain").and_then(Value::as_bool) != Some(false)
+            || !record.get("attachment").is_some_and(Value::is_object)
+        {
+            return Err(HistoryError::new(
+                "unsupported_schema",
+                "attachment ancestry is not a supported main-chain record",
+            ));
+        }
+        let stable_id = |value: &str| {
+            !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+        };
+        let id = optional_string(&record, "uuid")
+            .filter(|value| stable_id(value))
+            .ok_or_else(|| {
+                HistoryError::new("unsupported_schema", "attachment has no stable ID")
+            })?;
+        let parent = match record.get("parentUuid") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if stable_id(value) => Some(value.clone()),
+            _ => {
+                return Err(HistoryError::new(
+                    "unsupported_schema",
+                    "attachment has no supported parent ID",
+                ));
+            }
+        };
+        // Only IDs enter the ancestry index; attachment bodies are never normalized or cached.
+        return Ok(ParsedRecord {
+            message: None,
+            parent_link: Some(ParentLink { id, parent }),
+        });
+    }
+    Ok(ParsedRecord {
+        message: normalize_record(record, session)?,
+        parent_link: None,
+    })
+}
+
+fn normalize_record(
+    record: Value,
+    session: &str,
+) -> Result<Option<ConversationMessage>, HistoryError> {
     let kind = record.get("type").and_then(Value::as_str).ok_or_else(|| {
         HistoryError::new(
             "unsupported_schema",
@@ -38,7 +102,11 @@ pub fn normalize(line: &[u8], session: &str) -> Result<Option<ConversationMessag
             | "custom-title"
             | "agent-name"
             | "agent-color"
-            | "session-info" => Ok(None),
+            | "session-info"
+            | "mode"
+            | "permission-mode"
+            | "atis-latch"
+            | "bridge-session" => Ok(None),
             _ => Err(HistoryError::new(
                 "unsupported_schema",
                 "unknown transcript record type",
@@ -166,10 +234,11 @@ pub fn normalize(line: &[u8], session: &str) -> Result<Option<ConversationMessag
         || record.get("isMeta").and_then(Value::as_bool) == Some(true)
         || record.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
         || record.get("sourceToolAssistantUUID").is_some()
-        || record
-            .get("origin")
-            .and_then(Value::as_str)
-            .is_some_and(|o| o != "human")
+        || record.get("origin").is_some_and(|origin| match origin {
+            Value::String(kind) => kind != "human",
+            Value::Object(_) => origin.get("kind").and_then(Value::as_str) != Some("human"),
+            _ => true,
+        })
     {
         human = false;
     }

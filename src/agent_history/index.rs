@@ -52,6 +52,7 @@ struct Source {
     complete_offset: u64,
     prefix_hash: String,
     entries: HashMap<String, Entry>,
+    parent_links: HashMap<String, Option<String>>,
     order: Vec<String>,
     turns: Vec<ConversationTurn>,
     epoch: u64,
@@ -573,6 +574,7 @@ impl Source {
         }
         if rewrite {
             self.entries.clear();
+            self.parent_links.clear();
             self.order.clear();
             self.turns.clear();
             self.complete_offset = 0;
@@ -632,8 +634,14 @@ impl Source {
             if oversized {
                 self.unsupported = true;
             } else if !line.iter().all(u8::is_ascii_whitespace) {
-                match claude::normalize(&line, &binding.session_id) {
-                    Ok(Some(message)) => {
+                match claude::parse_record(&line, &binding.session_id) {
+                    Ok(claude::ParsedRecord {
+                        message: Some(message),
+                        ..
+                    }) => {
+                        if self.parent_links.remove(&message.id).is_some() {
+                            self.unsupported = true;
+                        }
                         let entry = Entry {
                             offset,
                             first_offset: self
@@ -666,7 +674,17 @@ impl Source {
                         }
                         self.entries.insert(entry.id.clone(), entry);
                     }
-                    Ok(None) => {}
+                    Ok(claude::ParsedRecord {
+                        parent_link: Some(claude::ParentLink { id, parent }),
+                        ..
+                    }) => {
+                        if self.entries.contains_key(&id) {
+                            self.unsupported = true;
+                        } else {
+                            self.parent_links.insert(id, parent);
+                        }
+                    }
+                    Ok(_) => {}
                     Err(error) if error.code == "session_changed" => return Err(error),
                     Err(_) => {
                         self.unsupported = true;
@@ -769,11 +787,13 @@ impl Source {
                 self.unsupported = true;
                 break;
             }
-            at = self
-                .entries
-                .get(&id)
-                .and_then(|e| e.parent.clone())
-                .filter(|p| self.entries.contains_key(p));
+            let parent = match self.entries.get(&id) {
+                Some(entry) => entry.parent.clone(),
+                None => self.parent_links.get(&id).cloned().flatten(),
+            };
+            at = parent.filter(|parent| {
+                self.entries.contains_key(parent) || self.parent_links.contains_key(parent)
+            });
         }
         if ancestors.len() > 1 {
             let compact_offset = ancestors

@@ -42,6 +42,413 @@ fn record(id: &str, parent: Option<&str>, role: &str, content: serde_json::Value
         serde_json::json!({"type":role,"uuid":id,"parentUuid":parent,"sessionId":"synthetic-session","isSidechain":false,"message":{"role":role,"content":content}})
     )
 }
+fn attachment_record(id: &str, parent: Option<&str>) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type":"attachment", "uuid":id, "parentUuid":parent,
+            "sessionId":"synthetic-session", "isSidechain":false,
+            "attachment":{"type":"system-reminder", "content":"HIDDEN_ATTACHMENT_BODY",
+                "rendered":"HIDDEN_RENDERED", "data":"HIDDEN_BASE64"}
+        })
+    )
+}
+fn changed_record(line: &str, key: &str, value: serde_json::Value) -> String {
+    let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+    record[key] = value;
+    format!("{record}\n")
+}
+
+#[test]
+fn hidden_attachment_links_preserve_human_turn_search_around_and_jump() {
+    let root = changed_record(
+        &record("u1", None, "user", "synthetic human question".into()),
+        "origin",
+        serde_json::json!({"kind":"human"}),
+    );
+    let mut text = root + &attachment_record("a1", Some("u1"));
+    text.push_str(&attachment_record("a2", Some("a1")));
+    text.push_str(&record(
+        "r1",
+        Some("a2"),
+        "assistant",
+        "supported plain reply".into(),
+    ));
+    text.push_str(&record("r2", Some("r1"), "assistant", "final reply".into()));
+    for kind in ["mode", "permission-mode", "atis-latch", "bridge-session"] {
+        text.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"type":kind,"content":"HIDDEN_METADATA_BODY"})
+        ));
+    }
+    let fixture = Fixture::new(&text);
+    let mut reader = ConversationReader::default();
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(page.completeness, "source_available");
+    assert_eq!(
+        page.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["u1", "r1", "r2"]
+    );
+    assert_eq!(page.turns.len(), 1);
+    assert_eq!(page.turns[0].message_id, "u1");
+    assert!(page
+        .messages
+        .iter()
+        .all(|message| message.turn_id == "turn:u1"));
+    let encoded = serde_json::to_string(&page).unwrap();
+    assert!(!encoded.contains("HIDDEN_"));
+    let search = reader
+        .read(
+            &fixture.binding,
+            Window::Search {
+                query: "synthetic human".into(),
+                cursor: None,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(search.match_message_ids, ["u1"]);
+    let hidden_search = reader
+        .read(
+            &fixture.binding,
+            Window::Search {
+                query: "HIDDEN_".into(),
+                cursor: None,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert!(hidden_search.match_message_ids.is_empty());
+    let around = reader
+        .read(
+            &fixture.binding,
+            Window::Around {
+                message_id: "u1".into(),
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(around.messages[0].id, "u1");
+    let prompt = reader
+        .exact_human_prompt(&fixture.binding, "u1", &page.messages[0].message_revision)
+        .unwrap();
+    assert_eq!(prompt.text, "synthetic human question");
+    assert_eq!(prompt.assistant_line, "supported plain reply");
+    assert!(claude::normalize(
+        attachment_record("a1", Some("u1")).as_bytes(),
+        "synthetic-session"
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[test]
+fn hidden_attachment_links_follow_appended_branch_replacements() {
+    let fixture = Fixture::new(
+        &(record("root", None, "user", "question".into())
+            + &record("other-root", None, "user", "another question".into())
+            + &attachment_record("old-link", Some("root"))
+            + &record(
+                "abandoned",
+                Some("old-link"),
+                "assistant",
+                "abandoned reply".into(),
+            )),
+    );
+    let mut reader = ConversationReader::default();
+    let first = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    fixture.append(
+        &(attachment_record("new-link", Some("root"))
+            + &attachment_record("new-link-2", Some("new-link"))
+            + &record(
+                "selected",
+                Some("new-link-2"),
+                "assistant",
+                "selected reply".into(),
+            )),
+    );
+    let changes = reader
+        .read(
+            &fixture.binding,
+            Window::Changes {
+                cursor: first.changes_cursor.unwrap(),
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(changes.removed_message_ids, ["abandoned"]);
+    assert_eq!(changes.upserts.len(), 1);
+    assert_eq!(changes.upserts[0].id, "selected");
+    assert_eq!(changes.upserts[0].turn_id, "turn:root");
+    fixture.append(&record(
+        "selected",
+        Some("new-link-2"),
+        "assistant",
+        "replaced reply".into(),
+    ));
+    let updated = reader
+        .read(
+            &fixture.binding,
+            Window::Changes {
+                cursor: changes.changes_cursor.unwrap(),
+            },
+            Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(updated.upserts.len(), 1);
+    assert_eq!(
+        updated.upserts[0].blocks[0].text.as_deref(),
+        Some("replaced reply")
+    );
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    let old_prompt = reader
+        .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+        .unwrap();
+    fixture.append(&attachment_record("new-link-2", Some("other-root")));
+    let relinked = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(
+        relinked
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["other-root", "selected"]
+    );
+    assert!(relinked
+        .messages
+        .iter()
+        .all(|message| message.turn_id == "turn:other-root"));
+    assert!(reader.validate_jump_source(&old_prompt).is_err());
+    fixture.append(&record(
+        "reselected",
+        Some("abandoned"),
+        "assistant",
+        "original branch again".into(),
+    ));
+    let original = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(
+        original
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["root", "abandoned", "reselected"]
+    );
+    assert_eq!(original.turns.len(), 1);
+}
+
+#[test]
+fn rewrite_clears_hidden_attachment_links_and_invalidates_saved_jump() {
+    let fixture = Fixture::new(
+        &(record("root", None, "user", "old question".into())
+            + &attachment_record("bridge", Some("root"))
+            + &record("reply", Some("bridge"), "assistant", "old reply".into())),
+    );
+    let mut reader = ConversationReader::default();
+    let first = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    let prompt = reader
+        .exact_human_prompt(
+            &fixture.binding,
+            "root",
+            &first.messages[0].message_revision,
+        )
+        .unwrap();
+    std::fs::write(
+        &fixture.path,
+        record("root", None, "user", "new question".into())
+            + &record("new-reply", Some("bridge"), "assistant", "new reply".into())
+            + &record(
+                "new-reply-2",
+                Some("new-reply"),
+                "assistant",
+                "final reply".into(),
+            ),
+    )
+    .unwrap();
+    let current = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(
+        current
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["new-reply", "new-reply-2"]
+    );
+    assert!(current.turns.is_empty());
+    assert!(reader.validate_jump_source(&prompt).is_err());
+    assert_eq!(
+        reader
+            .read(
+                &fixture.binding,
+                Window::Changes {
+                    cursor: first.changes_cursor.unwrap()
+                },
+                Limits::default()
+            )
+            .unwrap_err()
+            .code,
+        "cursor_expired"
+    );
+}
+
+#[test]
+fn attachment_ancestry_cycles_are_bounded_and_disable_terminal_jump() {
+    let fixture = Fixture::new(
+        &(record("root", Some("a1"), "user", "question".into())
+            + &attachment_record("a1", Some("a2"))
+            + &attachment_record("a2", Some("a1"))
+            + &record("reply", Some("root"), "assistant", "reply".into())),
+    );
+    let mut reader = ConversationReader::default();
+    let page = reader
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(page.completeness, "partial_unsupported_records");
+    assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+    assert!(reader
+        .exact_human_prompt(&fixture.binding, "root", &page.messages[0].message_revision)
+        .is_err());
+}
+
+#[test]
+fn attachment_links_reject_foreign_sessions_and_never_follow_sidechains_or_agents() {
+    let foreign = changed_record(
+        &attachment_record("bridge", Some("root")),
+        "sessionId",
+        "foreign-session".into(),
+    );
+    let fixture = Fixture::new(&(record("root", None, "user", "question".into()) + &foreign));
+    let mut reader = ConversationReader::default();
+    assert_eq!(
+        reader
+            .read(&fixture.binding, Window::Latest, Limits::default())
+            .unwrap_err()
+            .code,
+        "session_changed"
+    );
+    for ignored in [
+        changed_record(
+            &attachment_record("bridge", Some("root")),
+            "isSidechain",
+            true.into(),
+        ),
+        changed_record(
+            &attachment_record("bridge", Some("root")),
+            "agentId",
+            "subagent".into(),
+        ),
+    ] {
+        let fixture = Fixture::new(
+            &(record("root", None, "user", "question".into())
+                + &ignored
+                + &record("reply", Some("bridge"), "assistant", "reply".into())
+                + &record("reply-2", Some("reply"), "assistant", "final".into())),
+        );
+        let page = reader
+            .read(&fixture.binding, Window::Latest, Limits::default())
+            .unwrap();
+        assert!(page.turns.is_empty());
+        assert!(page
+            .messages
+            .iter()
+            .all(|message| message.id != "root" && message.id != "bridge"));
+        assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+    }
+}
+
+#[test]
+fn attachment_ids_are_bounded_and_unknown_record_types_remain_unsupported() {
+    for invalid in [
+        changed_record(
+            &attachment_record("bridge", Some("root")),
+            "uuid",
+            "x".repeat(513).into(),
+        ),
+        changed_record(
+            &attachment_record("bridge", Some("root")),
+            "parentUuid",
+            "x".repeat(513).into(),
+        ),
+        changed_record(
+            &attachment_record("bridge", Some("root")),
+            "parentUuid",
+            "bad\nparent".into(),
+        ),
+        changed_record(
+            &attachment_record("bridge", Some("root")),
+            "attachment",
+            "HIDDEN_ATTACHMENT_BODY".into(),
+        ),
+        changed_record(
+            &attachment_record("bridge", Some("root")),
+            "type",
+            "unknown-new-metadata".into(),
+        ),
+    ] {
+        let fixture = Fixture::new(&(record("root", None, "user", "question".into()) + &invalid));
+        let page = ConversationReader::default()
+            .read(&fixture.binding, Window::Latest, Limits::default())
+            .unwrap();
+        assert_eq!(page.completeness, "partial_unsupported_records");
+        assert!(!serde_json::to_string(&page).unwrap().contains("HIDDEN_"));
+    }
+}
+
+#[test]
+fn object_origin_classifies_human_and_automation_prompts_conservatively() {
+    let mut text = String::new();
+    for (id, origin) in [
+        ("human-object", serde_json::json!({"kind":"human"})),
+        ("human-string", "human".into()),
+        (
+            "automation-object",
+            serde_json::json!({"kind":"automation"}),
+        ),
+        ("automation-string", "automation".into()),
+        ("unknown-object", serde_json::json!({"source":"unknown"})),
+        ("malformed-origin", serde_json::json!(["human"])),
+    ] {
+        text.push_str(&changed_record(
+            &record(id, None, "user", "generated request".into()),
+            "origin",
+            origin,
+        ));
+    }
+    let fixture = Fixture::new(&text);
+    let page = ConversationReader::default()
+        .read(&fixture.binding, Window::Latest, Limits::default())
+        .unwrap();
+    assert_eq!(
+        page.turns
+            .iter()
+            .map(|turn| turn.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["human-object", "human-string"]
+    );
+    assert!(page
+        .messages
+        .iter()
+        .skip(2)
+        .all(|message| message.origin != "human"));
+}
+
 #[test]
 fn exact_binding_keeps_custom_long_paths_and_rejects_other_owners() {
     let path = format!(
