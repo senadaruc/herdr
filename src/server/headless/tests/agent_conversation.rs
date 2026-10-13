@@ -1,5 +1,34 @@
 use super::*;
 
+fn receive_conversation_endpoint_response(
+    receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+    expected_request_id: &str,
+) -> serde_json::Value {
+    // Connection state/control packets may precede an asynchronous response.
+    for _ in 0..16 {
+        let message = read_server_message(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("conversation endpoint response"),
+        );
+        match message {
+            ServerMessage::ClientShellEndpointResponseChunk {
+                request_id,
+                final_chunk,
+                data,
+                ..
+            } => {
+                assert_eq!(request_id, expected_request_id);
+                assert!(final_chunk);
+                return serde_json::from_slice(&data).unwrap();
+            }
+            ServerMessage::EndpointControl { .. } | ServerMessage::WindowTitle { .. } => {}
+            other => panic!("unexpected conversation endpoint packet: {other:?}"),
+        }
+    }
+    panic!("conversation endpoint response exceeded the control packet bound");
+}
+
 #[tokio::test]
 async fn conversation_endpoint_worker_preserves_foreground_and_terminal_geometry() {
     let mut server = test_headless_server();
@@ -106,12 +135,7 @@ async fn conversation_endpoint_worker_preserves_foreground_and_terminal_geometry
         .unwrap()
         .unwrap();
     assert!(!server.handle_server_event(ready));
-    let ServerMessage::ClientShellEndpointResponseChunk { data, .. } =
-        read_server_message(first_control.recv().unwrap())
-    else {
-        panic!("expected history endpoint response");
-    };
-    let response: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    let response = receive_conversation_endpoint_response(&first_control, "history-read");
     assert_eq!(response["result"]["availability"], "ready");
     let message_revision = response["result"]["messages"][0]["message_revision"]
         .as_str()
@@ -149,12 +173,7 @@ async fn conversation_endpoint_worker_preserves_foreground_and_terminal_geometry
         .unwrap()
         .unwrap();
     assert!(!server.handle_server_event(ready));
-    let ServerMessage::ClientShellEndpointResponseChunk { data, .. } =
-        read_server_message(first_control.recv().unwrap())
-    else {
-        panic!("expected jump endpoint response");
-    };
-    let response: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    let response = receive_conversation_endpoint_response(&first_control, "history-jump");
     assert_eq!(response["result"]["type"], "agent_conversation_jump");
     assert!(response["result"]["offset_from_bottom"].as_u64().unwrap() > 0);
     let runtime = server.app.terminal_runtimes.get(&terminal_id).unwrap();

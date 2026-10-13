@@ -5507,22 +5507,6 @@
         {
           "properties": {
             "method": {
-              "const": "agent.conversation.jump",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/schemas/request/$defs/ConversationJumpParams"
-            }
-          },
-          "required": [
-            "method",
-            "params"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "method": {
               "const": "agent.conversation.read",
               "type": "string"
             },
@@ -5544,6 +5528,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/ConversationBlockReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.conversation.jump",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ConversationJumpParams"
             }
           },
           "required": [

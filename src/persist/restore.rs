@@ -440,6 +440,23 @@ fn restore_workspace(
     )
 }
 
+fn restore_history_binding(
+    terminal: &mut TerminalState,
+    pane: Option<&super::snapshot::PaneSnapshot>,
+) {
+    let Some(saved) = pane.and_then(|pane| pane.history_binding.as_ref()) else {
+        return;
+    };
+    if let Some(binding) = crate::agent_history::binding::HistoryBinding::from_report(
+        "herdr:claude",
+        "claude",
+        Some(&saved.session_id),
+        saved.transcript_path.to_str(),
+    ) {
+        terminal.set_history_binding(binding);
+    }
+}
+
 fn unavailable_restored_terminal(
     pane: Option<&super::snapshot::PaneSnapshot>,
     cwd: PathBuf,
@@ -453,6 +470,7 @@ fn unavailable_restored_terminal(
         terminal.launch_argv = pane.launch_argv.clone();
         if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
             terminal.set_persisted_agent_session(session);
+            restore_history_binding(&mut terminal, Some(pane));
         }
         if let Some(resume) = saved_reported_resume(pane) {
             terminal.restore_reported_resume(reported_resume_from_snapshot(resume));
@@ -598,18 +616,7 @@ fn restore_tab(
             }
             if let Some(session) = restored_agent_session {
                 terminal.set_persisted_agent_session(session);
-                if let Some(saved) = saved_pane.and_then(|pane| pane.history_binding.as_ref()) {
-                    if let Some(binding) =
-                        crate::agent_history::binding::HistoryBinding::from_report(
-                            "herdr:claude",
-                            "claude",
-                            Some(&saved.session_id),
-                            saved.transcript_path.to_str(),
-                        )
-                    {
-                        terminal.set_history_binding(binding);
-                    }
-                }
+                restore_history_binding(&mut terminal, saved_pane);
             }
             if let Some(resume) = restored_agent_resume {
                 terminal.restore_reported_resume(resume);
@@ -710,18 +717,7 @@ fn restore_tab(
                 }
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
-                    if let Some(saved) = saved_pane.and_then(|pane| pane.history_binding.as_ref()) {
-                        if let Some(binding) =
-                            crate::agent_history::binding::HistoryBinding::from_report(
-                                "herdr:claude",
-                                "claude",
-                                Some(&saved.session_id),
-                                saved.transcript_path.to_str(),
-                            )
-                        {
-                            terminal.set_history_binding(binding);
-                        }
-                    }
+                    restore_history_binding(&mut terminal, saved_pane);
                 }
                 if let Some(resume) = restored_agent_resume {
                     terminal.restore_reported_resume(resume);
@@ -1445,6 +1441,67 @@ mod tests {
         assert!(take_restore_plan_for_snapshot(&session, true, &mut resumed).is_none());
 
         assert!(restored_terminal_agent_session(Some(&session), true).is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_cold_restore_preserves_conversation_binding() {
+        for missing_shell in [false, true] {
+            let (mut snapshot, _) = snapshot_with_saved_pane_history();
+            let saved = snapshot.workspaces[0].tabs[0].panes.get_mut(&0).unwrap();
+            if !missing_shell {
+                saved.cwd = saved
+                    .cwd
+                    .join("__herdr_missing_history_restore_directory__");
+                assert!(!saved.cwd.exists());
+            }
+            saved.agent_session = Some(super::super::snapshot::PaneAgentSessionSnapshot {
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: "generated-unavailable-history".into(),
+            });
+            let transcript = std::env::temp_dir().join("generated-unavailable-history.jsonl");
+            saved.history_binding = crate::agent_history::binding::HistoryBinding::from_report(
+                "herdr:claude",
+                "claude",
+                Some("generated-unavailable-history"),
+                transcript.to_str(),
+            );
+            let (events, _rx) = mpsc::channel(32);
+            let (workspaces, terminals, runtimes) = restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                0,
+                if missing_shell {
+                    "__herdr_missing_history_restore_shell__"
+                } else {
+                    test_restore_shell()
+                },
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            );
+            assert!(runtimes.is_empty());
+            assert!(terminals
+                .values()
+                .all(|terminal| terminal.restore_error.is_some()));
+            let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+            let captured = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+            let restored = captured.workspaces[0].tabs[0]
+                .panes
+                .values()
+                .next()
+                .unwrap();
+            let binding = restored.history_binding.as_ref().expect(
+                "unavailable pane restore followed by a save must retain conversation binding",
+            );
+            assert_eq!(binding.session_id, "generated-unavailable-history");
+            assert_eq!(binding.transcript_path, transcript);
+        }
     }
 
     #[tokio::test]
