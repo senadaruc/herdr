@@ -1,8 +1,8 @@
 use super::*;
 
+mod agent_conversation;
 mod event_fairness;
 mod native_graphics;
-mod agent_conversation;
 #[path = "pane_move.rs"]
 mod pane_move_tests;
 #[path = "pane_graphics.rs"]

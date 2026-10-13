@@ -86,6 +86,7 @@ fn pi_session_report(
 ) {
     app.handle_app_event(AppEvent::AgentSessionReported {
         pane_id,
+        history_binding: None,
         source: "herdr:pi".into(),
         agent_label: "pi".into(),
         seq: Some(seq),
@@ -97,6 +98,7 @@ fn pi_session_report(
 fn claude_session_report(app: &mut AppState, pane_id: PaneId, seq: u64) {
     app.handle_app_event(AppEvent::AgentSessionReported {
         pane_id,
+        history_binding: None,
         source: "herdr:claude".into(),
         agent_label: "claude".into(),
         seq: Some(seq),

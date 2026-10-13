@@ -3318,6 +3318,7 @@ mod tests {
         for (seq, session, reason) in [(1, "old-session", "startup"), (2, "new-session", "clear")] {
             let updates = app.handle_app_event(AppEvent::AgentSessionReported {
                 pane_id,
+                history_binding: None,
                 source: "herdr:claude".into(),
                 agent_label: "claude".into(),
                 seq: Some(seq),
@@ -3697,6 +3698,7 @@ mod tests {
         for (session, seq) in [("first", 1), ("second", 4)] {
             state.handle_app_event(AppEvent::AgentSessionReported {
                 pane_id,
+                history_binding: None,
                 source: "herdr:codex".into(),
                 agent_label: "codex".into(),
                 seq: Some(seq),
